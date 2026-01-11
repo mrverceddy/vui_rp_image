@@ -29,7 +29,7 @@ Server runs at `http://POD_IP:8000`
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /generate_image` | Flux text-to-image |
+| `POST /generate_image` | Qwen-Image-2512 text-to-image |
 | `POST /generate_video` | Wan 2.2 image-to-video |
 | `POST /generate_voice` | Parler-TTS voice generation |
 | `POST /synthesize_voice` | Fish Speech voice cloning |
@@ -38,8 +38,8 @@ Server runs at `http://POD_IP:8000`
 
 ## Models Included
 
-- Flux Dev (images)
-- Wan 2.2 720p (video)
-- Parler-TTS (voice)
+- Qwen-Image-2512 (text-to-image)
+- Wan 2.2 720p (image-to-video)
+- Parler-TTS (voice from description)
 - Fish Speech (voice cloning)
-- Kohya sd-scripts (LoRA training)
+- Kohya sd-scripts (SDXL LoRA training)

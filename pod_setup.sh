@@ -60,8 +60,8 @@ os.environ["HF_HOME"] = "/workspace/models"
 
 from huggingface_hub import snapshot_download
 
-print("Downloading Flux Dev...")
-snapshot_download("black-forest-labs/FLUX.1-dev", local_dir="/workspace/models/flux-dev")
+print("Downloading Qwen-Image-2512...")
+snapshot_download("Qwen/Qwen-Image-2512", local_dir="/workspace/models/qwen-image")
 
 print("Downloading Wan 2.2 720p...")
 snapshot_download("Wan-AI/Wan2.2-I2V-14B-720P", local_dir="/workspace/models/wan-2.2-720p")

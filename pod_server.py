@@ -49,10 +49,11 @@ def clear_vram():
 
 class GenerateImageRequest(BaseModel):
     prompt: str
+    negative_prompt: str = ""
     width: int = 1024
     height: int = 1024
-    num_steps: int = 28
-    guidance: float = 3.5
+    num_steps: int = 50
+    guidance: float = 4.0
     seed: int = -1
 
 
@@ -94,34 +95,35 @@ class TrainLoRARequest(BaseModel):
 
 
 # =============================================================================
-# IMAGE GENERATION
+# IMAGE GENERATION (Qwen-Image-2512)
 # =============================================================================
 
-def load_flux():
-    if "flux" not in _models:
+def load_qwen_image():
+    if "qwen_image" not in _models:
         clear_vram()
-        print("Loading Flux Dev...")
-        from diffusers import FluxPipeline
-        _models["flux"] = FluxPipeline.from_pretrained(
-            MODEL_DIR / "flux-dev",
+        print("Loading Qwen-Image-2512...")
+        from diffusers import DiffusionPipeline
+        _models["qwen_image"] = DiffusionPipeline.from_pretrained(
+            MODEL_DIR / "qwen-image",
             torch_dtype=torch.bfloat16,
         )
-        _models["flux"].enable_model_cpu_offload()
-    return _models["flux"]
+        _models["qwen_image"].enable_model_cpu_offload()
+    return _models["qwen_image"]
 
 
 @app.post("/generate_image")
 async def generate_image(req: GenerateImageRequest):
-    pipe = load_flux()
+    pipe = load_qwen_image()
 
     generator = torch.Generator("cuda").manual_seed(req.seed) if req.seed >= 0 else None
 
     image = pipe(
         prompt=req.prompt,
+        negative_prompt=req.negative_prompt if req.negative_prompt else None,
         width=req.width,
         height=req.height,
         num_inference_steps=req.num_steps,
-        guidance_scale=req.guidance,
+        true_cfg_scale=req.guidance,
         generator=generator,
     ).images[0]
 
@@ -301,11 +303,11 @@ async def train_lora(req: TrainLoRARequest):
     with zipfile.ZipFile(zip_path) as z:
         z.extractall(dataset_dir / "images")
 
-    # Run Kohya training
+    # Run Kohya training (SDXL LoRA)
     cmd = [
         "accelerate", "launch",
-        "/workspace/sd-scripts/flux_train_network.py",
-        "--pretrained_model_name_or_path", "black-forest-labs/FLUX.1-dev",
+        "/workspace/sd-scripts/sdxl_train_network.py",
+        "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-xl-base-1.0",
         "--train_data_dir", str(dataset_dir / "images"),
         "--output_dir", str(output_dir),
         "--output_name", req.lora_name,
@@ -316,6 +318,7 @@ async def train_lora(req: TrainLoRARequest):
         "--resolution", f"{req.resolution},{req.resolution}",
         "--mixed_precision", "bf16",
         "--network_module", "networks.lora",
+        "--cache_latents",
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
