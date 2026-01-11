@@ -11,7 +11,7 @@ MODEL_DIR="/workspace/models"
 mkdir -p $MODEL_DIR
 
 # Install system dependencies
-apt-get update && apt-get install -y ffmpeg libsndfile1 git-lfs aria2
+apt-get update && apt-get install -y ffmpeg libsndfile1 git-lfs aria2 portaudio19-dev
 
 # Install Python dependencies
 pip install --upgrade pip
