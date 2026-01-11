@@ -1,0 +1,6 @@
+cd /workspace
+git clone https://github.com/mrverceddy/vui_rp_image.git
+cd vui_rp_image
+chmod +x pod_setup.sh
+./pod_setup.sh
+python pod_server.py
