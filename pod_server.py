@@ -146,10 +146,10 @@ async def generate_image(req: GenerateImageRequest):
 def load_wan():
     if "wan" not in _models:
         clear_vram()
-        print("Loading Wan 2.2 I2V...")
-        from diffusers import WanImageToVideoPipeline
-        _models["wan"] = WanImageToVideoPipeline.from_pretrained(
-            MODEL_DIR / "wan-i2v",
+        print("Loading Wan 2.1 FLF2V (First-Last-Frame to Video)...")
+        from diffusers import WanFLFToVideoPipeline
+        _models["wan"] = WanFLFToVideoPipeline.from_pretrained(
+            MODEL_DIR / "wan-flf2v",
             torch_dtype=torch.bfloat16,
         ).to("cuda")
     return _models["wan"]
@@ -166,10 +166,18 @@ async def generate_video(req: GenerateVideoRequest):
     start_img = Image.open(io.BytesIO(base64.b64decode(req.start_frame_base64)))
     start_img = start_img.resize((req.width, req.height))
 
+    # Decode end frame if provided
+    end_img = None
+    if req.end_frame_base64:
+        end_img = Image.open(io.BytesIO(base64.b64decode(req.end_frame_base64)))
+        end_img = end_img.resize((req.width, req.height))
+
     generator = torch.Generator("cuda").manual_seed(req.seed) if req.seed >= 0 else None
 
+    # FLF2V uses first_image and last_image parameters
     output = pipe(
-        image=start_img,
+        first_image=start_img,
+        last_image=end_img,
         prompt=req.prompt,
         num_frames=req.num_frames,
         width=req.width,
