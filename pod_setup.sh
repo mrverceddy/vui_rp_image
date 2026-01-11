@@ -63,8 +63,8 @@ from huggingface_hub import snapshot_download
 print("Downloading Qwen-Image-2512...")
 snapshot_download("Qwen/Qwen-Image-2512", local_dir="/workspace/models/qwen-image")
 
-print("Downloading Wan 2.2 720p...")
-snapshot_download("Wan-AI/Wan2.2-I2V-14B-720P", local_dir="/workspace/models/wan-2.2-720p")
+print("Downloading Wan 2.2 I2V...")
+snapshot_download("Wan-AI/Wan2.2-I2V-A14B", local_dir="/workspace/models/wan-i2v")
 
 print("Downloading Parler-TTS...")
 snapshot_download("parler-tts/parler-tts-mini-v1", local_dir="/workspace/models/parler-tts")

@@ -147,10 +147,10 @@ async def generate_image(req: GenerateImageRequest):
 def load_wan():
     if "wan" not in _models:
         clear_vram()
-        print("Loading Wan 2.2...")
+        print("Loading Wan 2.2 I2V...")
         from diffusers import WanImageToVideoPipeline
         _models["wan"] = WanImageToVideoPipeline.from_pretrained(
-            MODEL_DIR / "wan-2.2-720p",
+            MODEL_DIR / "wan-i2v",
             torch_dtype=torch.bfloat16,
         )
         _models["wan"].enable_model_cpu_offload()
