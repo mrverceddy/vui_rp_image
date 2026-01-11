@@ -106,8 +106,7 @@ def load_qwen_image():
         _models["qwen_image"] = DiffusionPipeline.from_pretrained(
             MODEL_DIR / "qwen-image",
             torch_dtype=torch.bfloat16,
-        )
-        _models["qwen_image"].enable_model_cpu_offload()
+        ).to("cuda")
     return _models["qwen_image"]
 
 
@@ -152,8 +151,7 @@ def load_wan():
         _models["wan"] = WanImageToVideoPipeline.from_pretrained(
             MODEL_DIR / "wan-i2v",
             torch_dtype=torch.bfloat16,
-        )
-        _models["wan"].enable_model_cpu_offload()
+        ).to("cuda")
     return _models["wan"]
 
 
