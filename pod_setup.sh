@@ -16,9 +16,9 @@ apt-get update && apt-get install -y ffmpeg libsndfile1 git-lfs aria2 portaudio1
 # Upgrade pip
 pip install --upgrade pip
 
-# Install PyTorch 2.4 with CUDA 12.1 (required for latest diffusers)
-echo "Installing PyTorch 2.4..."
-pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu121
+# Install PyTorch 2.5 with CUDA 12.1 (required for Qwen-Image enable_gqa)
+echo "Installing PyTorch 2.5..."
+pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
 
 # Install diffusers stack with compatible versions
 echo "Installing diffusers and transformers..."
