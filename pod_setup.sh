@@ -13,36 +13,46 @@ mkdir -p $MODEL_DIR
 # Install system dependencies
 apt-get update && apt-get install -y ffmpeg libsndfile1 git-lfs aria2 portaudio19-dev
 
-# Install Python dependencies
+# Upgrade pip
 pip install --upgrade pip
+
+# Install PyTorch 2.4 with CUDA 12.1 (required for latest diffusers)
+echo "Installing PyTorch 2.4..."
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu121
+
+# Install diffusers stack with compatible versions
+echo "Installing diffusers and transformers..."
+pip install \
+    diffusers>=0.36.0 \
+    transformers>=4.50.0 \
+    huggingface_hub>=0.30.0 \
+    accelerate>=1.0.0 \
+    safetensors \
+    peft
+
+# Install other dependencies
 pip install \
     fastapi \
     uvicorn \
-    torch \
-    torchaudio \
-    torchvision \
-    transformers>=4.45.0 \
-    accelerate \
-    diffusers>=0.32.0 \
     sentencepiece \
     protobuf \
     scipy \
     soundfile \
     librosa \
-    huggingface_hub \
-    safetensors \
     omegaconf \
     einops \
     toml \
     bitsandbytes \
-    peft \
     aiofiles \
     python-multipart
 
-# Parler-TTS
-pip install git+https://github.com/huggingface/parler-tts.git
+# Parler-TTS (note: may have transformers version conflict, but still works)
+echo "Installing Parler-TTS..."
+pip install git+https://github.com/huggingface/parler-tts.git --no-deps
+pip install descript-audio-codec
 
 # Fish Speech
+echo "Installing Fish Speech..."
 pip install fish-speech
 
 # Kohya sd-scripts for LoRA training
@@ -80,5 +90,5 @@ echo "=== Setup Complete ==="
 echo "Models are in: /workspace/models"
 echo ""
 echo "To start the server, run:"
-echo "  python /workspace/pod_server.py"
+echo "  python /workspace/vui_rp_image/pod_server.py"
 echo ""
