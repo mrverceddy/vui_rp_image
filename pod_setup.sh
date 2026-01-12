@@ -22,9 +22,10 @@ pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https
 
 # Install diffusers stack with compatible versions
 echo "Installing diffusers and transformers..."
+# Diffusers from git for QwenImagePipeline support
+pip install git+https://github.com/huggingface/diffusers.git
 pip install \
-    diffusers>=0.36.0 \
-    transformers>=4.50.0 \
+    transformers>=4.51.3 \
     huggingface_hub>=0.30.0 \
     accelerate>=1.0.0 \
     safetensors \
