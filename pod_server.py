@@ -103,10 +103,12 @@ def load_qwen_image():
         clear_vram()
         print("Loading Qwen-Image-2512...")
         from diffusers import DiffusionPipeline
-        _models["qwen_image"] = DiffusionPipeline.from_pretrained(
+        pipe = DiffusionPipeline.from_pretrained(
             MODEL_DIR / "qwen-image",
             torch_dtype=torch.bfloat16,
-        ).to("cuda")
+        )
+        pipe.enable_model_cpu_offload()  # Handles meta tensors properly
+        _models["qwen_image"] = pipe
     return _models["qwen_image"]
 
 
@@ -148,10 +150,12 @@ def load_wan():
         clear_vram()
         print("Loading Wan 2.1 FLF2V (First-Last-Frame to Video)...")
         from diffusers import WanFLFToVideoPipeline
-        _models["wan"] = WanFLFToVideoPipeline.from_pretrained(
+        pipe = WanFLFToVideoPipeline.from_pretrained(
             MODEL_DIR / "wan-flf2v",
             torch_dtype=torch.bfloat16,
-        ).to("cuda")
+        )
+        pipe.enable_model_cpu_offload()  # Handles meta tensors properly
+        _models["wan"] = pipe
     return _models["wan"]
 
 
