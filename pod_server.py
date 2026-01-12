@@ -161,6 +161,36 @@ class TrainLoRARequest(BaseModel):
     resolution: int = 1024
 
 
+class SceneAngleRequest(BaseModel):
+    """Request for scene camera angle generation using Multiple Angles LoRA."""
+    image_base64: str
+    azimuth: str = "front view"  # front view, right side view, back view, left side view, etc.
+    elevation: str = "eye-level shot"  # low-angle shot, eye-level shot, elevated shot, high-angle shot
+    distance: str = "medium shot"  # close-up, medium shot, wide shot
+    additional_prompt: str = ""  # Optional additional context
+    width: int = 1024
+    height: int = 1024
+    num_steps: int = 40
+    guidance: float = 4.0
+    lora_strength: float = 0.9
+    seed: int = -1
+
+
+class CharacterVariationRequest(BaseModel):
+    """Request for character variation using reference conditioning (WWAA method).
+
+    This generates new images of a character from a reference image.
+    The reference is used as CONDITIONING, not img2img - generates from scratch.
+    """
+    reference_image_base64: str  # Reference image of the character
+    prompt: str  # Description of the new pose/scene (e.g., "the character is sitting on a bench")
+    width: int = 1280  # Match Wan 2.2 video output (16:9)
+    height: int = 720
+    num_steps: int = 20  # WWAA uses 20 steps
+    cfg: float = 4.0  # CFG scale (WWAA uses 4)
+    seed: int = -1
+
+
 # =============================================================================
 # IMAGE GENERATION (Qwen-Image-2512 for text2img, Qwen-Image-Edit-2511 for img2img)
 # =============================================================================
@@ -193,6 +223,54 @@ def load_qwen_image_edit():
         pipe.enable_model_cpu_offload()
         _models["qwen_image_edit"] = pipe
     return _models["qwen_image_edit"]
+
+
+def load_qwen_image_edit_plus():
+    """Load Qwen-Image-Edit-2511 Plus for reference conditioning (WWAA method).
+
+    This pipeline uses reference image as CONDITIONING, not init image.
+    Generates new images from scratch that maintain character consistency.
+    """
+    if "qwen_image_edit_plus" not in _models:
+        clear_vram()
+        print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
+        from diffusers import QwenImageEditPlusPipeline
+        pipe = QwenImageEditPlusPipeline.from_pretrained(
+            MODEL_DIR / "qwen-image-edit",
+            torch_dtype=torch.bfloat16,
+        )
+        pipe.enable_model_cpu_offload()
+        _models["qwen_image_edit_plus"] = pipe
+    return _models["qwen_image_edit_plus"]
+
+
+def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
+    """Load Qwen-Image-Edit-2511 with Multiple Angles LoRA for camera control."""
+    if "qwen_image_edit_angles" not in _models:
+        clear_vram()
+        print("Loading Qwen-Image-Edit-2511 with Multiple Angles LoRA...")
+        from diffusers import QwenImageEditPipeline
+
+        pipe = QwenImageEditPipeline.from_pretrained(
+            MODEL_DIR / "qwen-image-edit",
+            torch_dtype=torch.bfloat16,
+        )
+
+        # Load the Multiple Angles LoRA
+        lora_path = MODEL_DIR / "loras" / "multiple-angles"
+        lora_file = lora_path / "qwen-image-edit-2511-multiple-angles-lora.safetensors"
+
+        if lora_file.exists():
+            print(f"Loading Multiple Angles LoRA from {lora_file}...")
+            pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
+            pipe.fuse_lora(lora_scale=lora_strength)
+            print(f"LoRA loaded with strength {lora_strength}")
+        else:
+            print(f"Warning: LoRA file not found at {lora_file}, using base model")
+
+        pipe.enable_model_cpu_offload()
+        _models["qwen_image_edit_angles"] = pipe
+    return _models["qwen_image_edit_angles"]
 
 
 def _run_image_generation(job_id: str, req: dict):
@@ -332,6 +410,206 @@ async def edit_image(req: EditImageRequest):
     """
     job_id = create_job()
     _executor.submit(_run_image_edit, job_id, req.model_dump())
+    return {"job_id": job_id, "status": "pending"}
+
+
+# =============================================================================
+# CHARACTER VARIATION (Reference Conditioning - WWAA Method)
+# =============================================================================
+
+def _run_character_variation(job_id: str, req: dict):
+    """Background worker for character variation using reference conditioning.
+
+    Uses QwenImageEditPlusPipeline - reference image as CONDITIONING, not init image.
+    Generates from scratch while maintaining character consistency.
+    """
+    try:
+        from PIL import Image
+
+        update_job(job_id, status="running", progress=5)
+
+        # Load the Plus pipeline (reference conditioning)
+        pipe = load_qwen_image_edit_plus()
+        update_job(job_id, progress=15)
+
+        # Decode reference image
+        ref_image = Image.open(io.BytesIO(base64.b64decode(req["reference_image_base64"])))
+        ref_image = ref_image.convert("RGB")
+
+        seed = req.get("seed", -1)
+        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+
+        total_steps = req.get("num_steps", 20)
+
+        def progress_callback(pipe, step, timestep, callback_kwargs):
+            progress = 15 + int((step / total_steps) * 80)
+            update_job(job_id, progress=progress)
+            return callback_kwargs
+
+        # QwenImageEditPlusPipeline: reference image as conditioning
+        # Key difference: image is passed as list for conditioning, NOT init latent
+        output = pipe(
+            image=[ref_image],  # Reference image as conditioning (list!)
+            prompt=req["prompt"],
+            negative_prompt=" ",  # Minimal negative prompt
+            num_inference_steps=total_steps,
+            guidance_scale=1.0,  # WWAA uses guidance_scale=1.0
+            true_cfg_scale=req.get("cfg", 4.0),  # WWAA uses cfg=4
+            height=req.get("height", 720),
+            width=req.get("width", 1280),
+            generator=generator,
+            num_images_per_prompt=1,
+            callback_on_step_end=progress_callback,
+        )
+
+        image = output.images[0]
+        update_job(job_id, progress=95)
+
+        # Save and encode
+        path = OUTPUT_DIR / f"charvar_{job_id}.png"
+        image.save(path)
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        image_b64 = base64.b64encode(buffer.getvalue()).decode()
+
+        update_job(
+            job_id,
+            status="complete",
+            progress=100,
+            result={
+                "image_base64": image_b64,
+                "path": str(path),
+                "prompt": req["prompt"],
+                "width": req.get("width", 1280),
+                "height": req.get("height", 720),
+            },
+        )
+
+    except Exception as e:
+        import traceback
+        update_job(job_id, status="failed", error=f"{str(e)}\n{traceback.format_exc()}")
+
+
+@app.post("/generate_character_variation")
+async def generate_character_variation(req: CharacterVariationRequest):
+    """Generate character variation using reference conditioning (WWAA method).
+
+    This is the correct approach for LoRA training datasets:
+    - Reference image is used as CONDITIONING (not img2img)
+    - Generates completely new image from scratch
+    - Maintains character consistency via conditioning
+    - Output matches Wan 2.2 video format (1280x720, 16:9)
+
+    Example prompt: "the character is sitting on a wooden bench in a sunny park"
+    """
+    job_id = create_job()
+    _executor.submit(_run_character_variation, job_id, req.model_dump())
+    return {"job_id": job_id, "status": "pending"}
+
+
+# =============================================================================
+# SCENE CAMERA ANGLE GENERATION (Multiple Angles LoRA)
+# =============================================================================
+
+def _run_scene_angle(job_id: str, req: dict):
+    """Background worker for scene camera angle generation using Multiple Angles LoRA.
+
+    Uses the <sks> trigger format: <sks> [azimuth] [elevation] [distance]
+    """
+    try:
+        from PIL import Image
+
+        update_job(job_id, status="running", progress=5)
+
+        # Load model with LoRA
+        pipe = load_qwen_image_edit_with_angles_lora(req.get("lora_strength", 0.9))
+        update_job(job_id, progress=15)
+
+        # Decode input image
+        input_image = Image.open(io.BytesIO(base64.b64decode(req["image_base64"])))
+        input_image = input_image.convert("RGB")
+        input_image = input_image.resize((req.get("width", 1024), req.get("height", 1024)))
+
+        seed = req.get("seed", -1)
+        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+
+        # Build prompt with <sks> trigger
+        # Format: <sks> [azimuth] [elevation] [distance]
+        azimuth = req.get("azimuth", "front view")
+        elevation = req.get("elevation", "eye-level shot")
+        distance = req.get("distance", "medium shot")
+        additional = req.get("additional_prompt", "")
+
+        prompt = f"<sks> {azimuth} {elevation} {distance}"
+        if additional:
+            prompt = f"{prompt}, {additional}"
+
+        total_steps = req.get("num_steps", 40)
+
+        def progress_callback(pipe, step, timestep, callback_kwargs):
+            progress = 15 + int((step / total_steps) * 80)
+            update_job(job_id, progress=progress)
+            return callback_kwargs
+
+        image = pipe(
+            prompt=prompt,
+            negative_prompt=" ",  # Minimal negative prompt for this model
+            image=input_image,
+            height=req.get("height", 1024),
+            width=req.get("width", 1024),
+            num_inference_steps=total_steps,
+            guidance_scale=1.0,
+            true_cfg_scale=req.get("guidance", 4.0),
+            generator=generator,
+            callback_on_step_end=progress_callback,
+        ).images[0]
+
+        update_job(job_id, progress=95)
+
+        # Save and encode
+        path = OUTPUT_DIR / f"scene_angle_{job_id}.png"
+        image.save(path)
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        image_b64 = base64.b64encode(buffer.getvalue()).decode()
+
+        update_job(
+            job_id,
+            status="complete",
+            progress=100,
+            result={
+                "image_base64": image_b64,
+                "path": str(path),
+                "prompt": prompt,
+                "azimuth": azimuth,
+                "elevation": elevation,
+                "distance": distance,
+            },
+        )
+
+    except Exception as e:
+        import traceback
+        update_job(job_id, status="failed", error=f"{str(e)}\n{traceback.format_exc()}")
+
+
+@app.post("/generate_scene_angle")
+async def generate_scene_angle(req: SceneAngleRequest):
+    """Generate scene from different camera angle using Multiple Angles LoRA.
+
+    Camera Controls:
+    - azimuth: Horizontal rotation
+        - "front view" (0°), "front-right quarter view" (45°), "right side view" (90°)
+        - "back-right quarter view" (135°), "back view" (180°), "back-left quarter view" (225°)
+        - "left side view" (270°), "front-left quarter view" (315°)
+    - elevation: Vertical angle
+        - "low-angle shot" (-30°), "eye-level shot" (0°), "elevated shot" (30°), "high-angle shot" (60°)
+    - distance: Camera distance
+        - "close-up" (×0.6), "medium shot" (×1.0), "wide shot" (×1.8)
+    """
+    job_id = create_job()
+    _executor.submit(_run_scene_angle, job_id, req.model_dump())
     return {"job_id": job_id, "status": "pending"}
 
 

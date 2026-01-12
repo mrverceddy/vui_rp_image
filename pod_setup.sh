@@ -85,6 +85,22 @@ snapshot_download("parler-tts/parler-tts-mini-v1", local_dir="/workspace/models/
 print("Downloading Fish Speech...")
 snapshot_download("fishaudio/fish-speech-1.4", local_dir="/workspace/models/fish-speech")
 
+print("Downloading LoRAs...")
+
+# Multiple Angles LoRA for scene camera control
+print("  - Multiple Angles LoRA (scene camera control)...")
+snapshot_download(
+    "fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA",
+    local_dir="/workspace/models/loras/multiple-angles"
+)
+
+# Turbo LoRA for 20x faster text-to-image (4-8 steps instead of 30-40)
+print("  - Turbo LoRA (speed boost)...")
+snapshot_download(
+    "Wuli-art/Qwen-Image-2512-Turbo-LoRA",
+    local_dir="/workspace/models/loras/turbo"
+)
+
 print("=== All models downloaded! ===")
 EOF
 
