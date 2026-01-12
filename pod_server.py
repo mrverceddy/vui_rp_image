@@ -120,6 +120,13 @@ class GenerateImageRequest(BaseModel):
 class EditImageRequest(BaseModel):
     image_base64: str
     prompt: str
+    negative_prompt: str = ""
+    strength: float = 0.7  # How much to change (0.0 = no change, 1.0 = full regeneration)
+    width: int = 1024
+    height: int = 1024
+    num_steps: int = 28
+    guidance: float = 3.5
+    seed: int = -1
 
 
 class GenerateVideoRequest(BaseModel):
@@ -226,6 +233,91 @@ async def generate_image(req: GenerateImageRequest):
     """Submit image generation job. Returns job_id immediately."""
     job_id = create_job()
     _executor.submit(_run_image_generation, job_id, req.model_dump())
+    return {"job_id": job_id, "status": "pending"}
+
+
+# =============================================================================
+# IMAGE EDITING / REPOSING (img2img)
+# =============================================================================
+
+def _run_image_edit(job_id: str, req: dict):
+    """Background worker for image editing/reposing."""
+    try:
+        from PIL import Image
+
+        update_job(job_id, status="running", progress=5)
+
+        pipe = load_qwen_image()
+        update_job(job_id, progress=10)
+
+        # Decode input image
+        input_image = Image.open(io.BytesIO(base64.b64decode(req["image_base64"])))
+        input_image = input_image.convert("RGB")
+        input_image = input_image.resize((req.get("width", 1024), req.get("height", 1024)))
+
+        seed = req.get("seed", -1)
+        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+
+        strength = req.get("strength", 0.7)
+        # Calculate actual steps based on strength
+        total_steps = req.get("num_steps", 28)
+        actual_steps = int(total_steps * strength)
+        actual_steps = max(1, actual_steps)
+
+        # Create progress callback
+        def progress_callback(pipe, step, timestep, callback_kwargs):
+            progress = 10 + int((step / actual_steps) * 85)
+            update_job(job_id, progress=progress)
+            return callback_kwargs
+
+        # img2img: provide image and strength
+        # The pipeline will add noise to the image based on strength, then denoise
+        image = pipe(
+            prompt=req["prompt"],
+            negative_prompt=req.get("negative_prompt") or None,
+            image=input_image,
+            strength=strength,
+            width=req.get("width", 1024),
+            height=req.get("height", 1024),
+            num_inference_steps=total_steps,
+            true_cfg_scale=req.get("guidance", 3.5),
+            generator=generator,
+            callback_on_step_end=progress_callback,
+        ).images[0]
+
+        update_job(job_id, progress=95)
+
+        # Save and encode
+        path = OUTPUT_DIR / f"edit_{job_id}.png"
+        image.save(path)
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        image_b64 = base64.b64encode(buffer.getvalue()).decode()
+
+        update_job(
+            job_id,
+            status="complete",
+            progress=100,
+            result={"image_base64": image_b64, "path": str(path)},
+        )
+
+    except Exception as e:
+        import traceback
+        update_job(job_id, status="failed", error=f"{str(e)}\n{traceback.format_exc()}")
+
+
+@app.post("/edit_image")
+async def edit_image(req: EditImageRequest):
+    """Submit image edit/repose job. Takes a base image and transforms it based on prompt.
+
+    Use strength to control how much the image changes:
+    - 0.3-0.5: Minor changes (expression, small pose adjustments)
+    - 0.5-0.7: Moderate changes (different pose, same character)
+    - 0.7-0.9: Major changes (significant reposing)
+    """
+    job_id = create_job()
+    _executor.submit(_run_image_edit, job_id, req.model_dump())
     return {"job_id": job_id, "status": "pending"}
 
 
