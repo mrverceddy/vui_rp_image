@@ -27,7 +27,7 @@ pip install git+https://github.com/huggingface/diffusers.git
 pip install \
     transformers>=4.51.3 \
     huggingface_hub>=0.30.0 \
-    accelerate>=1.0.0 \
+    accelerate>=1.2.0 \
     safetensors \
     peft
 
