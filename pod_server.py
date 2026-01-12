@@ -372,12 +372,20 @@ async def download(filename: str):
 @app.on_event("startup")
 async def startup_preload():
     """Preload image model on startup to avoid timeout on first request."""
-    print("Preloading Qwen-Image-2512 for fast first request...")
-    try:
-        load_qwen_image()
-        print("Model preloaded and ready!")
-    except Exception as e:
-        print(f"Warning: Failed to preload model: {e}")
+    import threading
+
+    def preload():
+        print("Preloading Qwen-Image-2512 for fast first request...")
+        try:
+            load_qwen_image()
+            print("Model preloaded and ready!")
+        except Exception as e:
+            print(f"Warning: Failed to preload model: {e}")
+
+    # Run in background thread so server can start accepting requests
+    thread = threading.Thread(target=preload, daemon=True)
+    thread.start()
+    print("Model preload started in background...")
 
 
 if __name__ == "__main__":
