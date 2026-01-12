@@ -52,8 +52,8 @@ class GenerateImageRequest(BaseModel):
     negative_prompt: str = ""
     width: int = 1024
     height: int = 1024
-    num_steps: int = 50
-    guidance: float = 4.0
+    num_steps: int = 28  # Reduced for faster inference (avoid proxy timeout)
+    guidance: float = 3.5
     seed: int = -1
 
 
@@ -367,6 +367,17 @@ async def download(filename: str):
     if not path.exists():
         raise HTTPException(404, "File not found")
     return FileResponse(path)
+
+
+@app.on_event("startup")
+async def startup_preload():
+    """Preload image model on startup to avoid timeout on first request."""
+    print("Preloading Qwen-Image-2512 for fast first request...")
+    try:
+        load_qwen_image()
+        print("Model preloaded and ready!")
+    except Exception as e:
+        print(f"Warning: Failed to preload model: {e}")
 
 
 if __name__ == "__main__":
