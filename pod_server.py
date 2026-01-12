@@ -4,7 +4,7 @@ StoryGen GPU Server for RunPod Pods.
 Run with: python pod_server.py
 Access at: http://POD_IP:8000
 
-All GPU tasks available via REST API.
+All GPU tasks available via REST API with async job queue.
 """
 
 import base64
@@ -12,9 +12,12 @@ import gc
 import io
 import os
 import subprocess
-import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import torch
 import uvicorn
@@ -32,6 +35,11 @@ app = FastAPI(title="StoryGen GPU Server")
 # Global model cache
 _models = {}
 
+# Job queue system
+_jobs = {}  # job_id -> {status, progress, result, error, created_at}
+_executor = ThreadPoolExecutor(max_workers=1)  # Single worker for GPU tasks
+_job_lock = threading.Lock()
+
 
 def clear_vram():
     """Unload all models to free VRAM."""
@@ -44,6 +52,58 @@ def clear_vram():
 
 
 # =============================================================================
+# JOB QUEUE SYSTEM
+# =============================================================================
+
+def create_job() -> str:
+    """Create a new job and return its ID."""
+    job_id = uuid4().hex[:12]
+    with _job_lock:
+        _jobs[job_id] = {
+            "status": "pending",
+            "progress": 0,
+            "result": None,
+            "error": None,
+            "created_at": time.time(),
+        }
+    return job_id
+
+
+def update_job(job_id: str, **kwargs):
+    """Update job status."""
+    with _job_lock:
+        if job_id in _jobs:
+            _jobs[job_id].update(kwargs)
+
+
+def get_job(job_id: str) -> dict:
+    """Get job status."""
+    with _job_lock:
+        return _jobs.get(job_id, {}).copy()
+
+
+def cleanup_old_jobs(max_age_seconds: int = 3600):
+    """Remove jobs older than max_age_seconds."""
+    now = time.time()
+    with _job_lock:
+        to_remove = [
+            jid for jid, job in _jobs.items()
+            if now - job["created_at"] > max_age_seconds
+        ]
+        for jid in to_remove:
+            del _jobs[jid]
+
+
+@app.get("/job/{job_id}")
+async def get_job_status(job_id: str):
+    """Get job status and result."""
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return job
+
+
+# =============================================================================
 # REQUEST/RESPONSE MODELS
 # =============================================================================
 
@@ -52,7 +112,7 @@ class GenerateImageRequest(BaseModel):
     negative_prompt: str = ""
     width: int = 1024
     height: int = 1024
-    num_steps: int = 28  # Reduced for faster inference (avoid proxy timeout)
+    num_steps: int = 28
     guidance: float = 3.5
     seed: int = -1
 
@@ -107,38 +167,66 @@ def load_qwen_image():
             MODEL_DIR / "qwen-image",
             torch_dtype=torch.bfloat16,
         )
-        pipe.enable_model_cpu_offload()  # Handles meta tensors properly
+        pipe.enable_model_cpu_offload()
         _models["qwen_image"] = pipe
     return _models["qwen_image"]
 
 
+def _run_image_generation(job_id: str, req: dict):
+    """Background worker for image generation."""
+    try:
+        update_job(job_id, status="running", progress=5)
+
+        pipe = load_qwen_image()
+        update_job(job_id, progress=10)
+
+        seed = req.get("seed", -1)
+        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+
+        # Create progress callback
+        def progress_callback(pipe, step, timestep, callback_kwargs):
+            progress = 10 + int((step / req.get("num_steps", 28)) * 85)
+            update_job(job_id, progress=progress)
+            return callback_kwargs
+
+        image = pipe(
+            prompt=req["prompt"],
+            negative_prompt=req.get("negative_prompt") or None,
+            width=req.get("width", 1024),
+            height=req.get("height", 1024),
+            num_inference_steps=req.get("num_steps", 28),
+            true_cfg_scale=req.get("guidance", 3.5),
+            generator=generator,
+            callback_on_step_end=progress_callback,
+        ).images[0]
+
+        update_job(job_id, progress=95)
+
+        # Save and encode
+        path = OUTPUT_DIR / f"image_{job_id}.png"
+        image.save(path)
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        image_b64 = base64.b64encode(buffer.getvalue()).decode()
+
+        update_job(
+            job_id,
+            status="complete",
+            progress=100,
+            result={"image_base64": image_b64, "path": str(path)},
+        )
+
+    except Exception as e:
+        update_job(job_id, status="failed", error=str(e))
+
+
 @app.post("/generate_image")
 async def generate_image(req: GenerateImageRequest):
-    pipe = load_qwen_image()
-
-    generator = torch.Generator("cuda").manual_seed(req.seed) if req.seed >= 0 else None
-
-    image = pipe(
-        prompt=req.prompt,
-        negative_prompt=req.negative_prompt if req.negative_prompt else None,
-        width=req.width,
-        height=req.height,
-        num_inference_steps=req.num_steps,
-        true_cfg_scale=req.guidance,
-        generator=generator,
-    ).images[0]
-
-    # Save and return
-    path = OUTPUT_DIR / f"image_{os.urandom(4).hex()}.png"
-    image.save(path)
-
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-
-    return {
-        "image_base64": base64.b64encode(buffer.getvalue()).decode(),
-        "path": str(path),
-    }
+    """Submit image generation job. Returns job_id immediately."""
+    job_id = create_job()
+    _executor.submit(_run_image_generation, job_id, req.model_dump())
+    return {"job_id": job_id, "status": "pending"}
 
 
 # =============================================================================
@@ -148,66 +236,92 @@ async def generate_image(req: GenerateImageRequest):
 def load_wan():
     if "wan" not in _models:
         clear_vram()
-        print("Loading Wan 2.1 FLF2V (First-Last-Frame to Video)...")
+        print("Loading Wan 2.1 FLF2V...")
         from diffusers import WanFLFToVideoPipeline
         pipe = WanFLFToVideoPipeline.from_pretrained(
             MODEL_DIR / "wan-flf2v",
             torch_dtype=torch.bfloat16,
         )
-        pipe.enable_model_cpu_offload()  # Handles meta tensors properly
+        pipe.enable_model_cpu_offload()
         _models["wan"] = pipe
     return _models["wan"]
 
 
+def _run_video_generation(job_id: str, req: dict):
+    """Background worker for video generation."""
+    try:
+        from PIL import Image
+        from diffusers.utils import export_to_video
+
+        update_job(job_id, status="running", progress=5)
+
+        pipe = load_wan()
+        update_job(job_id, progress=10)
+
+        # Decode frames
+        start_img = Image.open(io.BytesIO(base64.b64decode(req["start_frame_base64"])))
+        start_img = start_img.resize((req.get("width", 1280), req.get("height", 720)))
+
+        end_img = None
+        if req.get("end_frame_base64"):
+            end_img = Image.open(io.BytesIO(base64.b64decode(req["end_frame_base64"])))
+            end_img = end_img.resize((req.get("width", 1280), req.get("height", 720)))
+
+        seed = req.get("seed", -1)
+        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+
+        def progress_callback(pipe, step, timestep, callback_kwargs):
+            progress = 10 + int((step / req.get("num_steps", 30)) * 85)
+            update_job(job_id, progress=progress)
+            return callback_kwargs
+
+        output = pipe(
+            first_image=start_img,
+            last_image=end_img,
+            prompt=req["prompt"],
+            num_frames=req.get("num_frames", 81),
+            width=req.get("width", 1280),
+            height=req.get("height", 720),
+            num_inference_steps=req.get("num_steps", 30),
+            guidance_scale=req.get("guidance", 5.0),
+            generator=generator,
+            callback_on_step_end=progress_callback,
+        )
+
+        update_job(job_id, progress=95)
+
+        frames = output.frames[0]
+        path = OUTPUT_DIR / f"video_{job_id}.mp4"
+        export_to_video(frames, str(path), fps=16)
+
+        with open(path, "rb") as f:
+            video_b64 = base64.b64encode(f.read()).decode()
+
+        update_job(
+            job_id,
+            status="complete",
+            progress=100,
+            result={
+                "video_base64": video_b64,
+                "path": str(path),
+                "duration_seconds": req.get("num_frames", 81) / 16.0,
+            },
+        )
+
+    except Exception as e:
+        update_job(job_id, status="failed", error=str(e))
+
+
 @app.post("/generate_video")
 async def generate_video(req: GenerateVideoRequest):
-    from PIL import Image
-    from diffusers.utils import export_to_video
-
-    pipe = load_wan()
-
-    # Decode start frame
-    start_img = Image.open(io.BytesIO(base64.b64decode(req.start_frame_base64)))
-    start_img = start_img.resize((req.width, req.height))
-
-    # Decode end frame if provided
-    end_img = None
-    if req.end_frame_base64:
-        end_img = Image.open(io.BytesIO(base64.b64decode(req.end_frame_base64)))
-        end_img = end_img.resize((req.width, req.height))
-
-    generator = torch.Generator("cuda").manual_seed(req.seed) if req.seed >= 0 else None
-
-    # FLF2V uses first_image and last_image parameters
-    output = pipe(
-        first_image=start_img,
-        last_image=end_img,
-        prompt=req.prompt,
-        num_frames=req.num_frames,
-        width=req.width,
-        height=req.height,
-        num_inference_steps=req.num_steps,
-        guidance_scale=req.guidance,
-        generator=generator,
-    )
-
-    frames = output.frames[0]
-
-    path = OUTPUT_DIR / f"video_{os.urandom(4).hex()}.mp4"
-    export_to_video(frames, str(path), fps=16)
-
-    with open(path, "rb") as f:
-        video_b64 = base64.b64encode(f.read()).decode()
-
-    return {
-        "video_base64": video_b64,
-        "path": str(path),
-        "duration_seconds": req.num_frames / 16.0,
-    }
+    """Submit video generation job. Returns job_id immediately."""
+    job_id = create_job()
+    _executor.submit(_run_video_generation, job_id, req.model_dump())
+    return {"job_id": job_id, "status": "pending"}
 
 
 # =============================================================================
-# VOICE GENERATION
+# VOICE GENERATION (sync - fast enough)
 # =============================================================================
 
 def load_parler():
@@ -259,9 +373,8 @@ async def generate_voice(req: GenerateVoiceRequest):
 
 @app.post("/synthesize_voice")
 async def synthesize_voice(req: SynthesizeVoiceRequest):
-    clear_vram()  # Fish Speech runs as subprocess
+    clear_vram()
 
-    # Save reference audio
     ref_path = OUTPUT_DIR / f"ref_{os.urandom(4).hex()}.wav"
     ref_path.write_bytes(base64.b64decode(req.reference_audio_base64))
 
@@ -298,22 +411,19 @@ async def train_lora(req: TrainLoRARequest):
     import zipfile
     from urllib.request import urlretrieve
 
-    clear_vram()  # Need all VRAM for training
+    clear_vram()
 
-    # Setup dirs
     dataset_dir = Path("/tmp/dataset")
     output_dir = Path("/workspace/loras")
     dataset_dir.mkdir(exist_ok=True)
     output_dir.mkdir(exist_ok=True)
 
-    # Download dataset
     zip_path = dataset_dir / "dataset.zip"
     urlretrieve(req.dataset_url, zip_path)
 
     with zipfile.ZipFile(zip_path) as z:
         z.extractall(dataset_dir / "images")
 
-    # Run Kohya training (SDXL LoRA)
     cmd = [
         "accelerate", "launch",
         "/workspace/sd-scripts/sdxl_train_network.py",
@@ -351,11 +461,13 @@ async def train_lora(req: TrainLoRARequest):
 
 @app.get("/health")
 async def health():
+    cleanup_old_jobs()  # Clean up old jobs on health check
     return {
         "status": "ok",
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none",
         "vram_gb": torch.cuda.get_device_properties(0).total_memory / 1e9 if torch.cuda.is_available() else 0,
         "models_loaded": list(_models.keys()),
+        "active_jobs": len([j for j in _jobs.values() if j["status"] in ("pending", "running")]),
     }
 
 
@@ -375,25 +487,22 @@ async def download(filename: str):
 
 @app.on_event("startup")
 async def startup_preload():
-    """Preload image model on startup to avoid timeout on first request."""
-    import threading
-
+    """Preload image model on startup."""
     def preload():
-        print("Preloading Qwen-Image-2512 for fast first request...")
+        print("Preloading Qwen-Image-2512...")
         try:
             load_qwen_image()
             print("Model preloaded and ready!")
         except Exception as e:
-            print(f"Warning: Failed to preload model: {e}")
+            print(f"Warning: Failed to preload: {e}")
 
-    # Run in background thread so server can start accepting requests
     thread = threading.Thread(target=preload, daemon=True)
     thread.start()
     print("Model preload started in background...")
 
 
 if __name__ == "__main__":
-    print("Starting StoryGen GPU Server...")
+    print("Starting StoryGen GPU Server (with job queue)...")
     print(f"Models dir: {MODEL_DIR}")
     print(f"Output dir: {OUTPUT_DIR}")
     uvicorn.run(app, host="0.0.0.0", port=8000)
