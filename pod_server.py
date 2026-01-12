@@ -162,13 +162,14 @@ class TrainLoRARequest(BaseModel):
 
 
 # =============================================================================
-# IMAGE GENERATION (Qwen-Image-2512)
+# IMAGE GENERATION (Qwen-Image-2512 for text2img, Qwen-Image-Edit-2511 for img2img)
 # =============================================================================
 
 def load_qwen_image():
+    """Load Qwen-Image-2512 for text-to-image generation."""
     if "qwen_image" not in _models:
         clear_vram()
-        print("Loading Qwen-Image-2512...")
+        print("Loading Qwen-Image-2512 (text-to-image)...")
         from diffusers import DiffusionPipeline
         pipe = DiffusionPipeline.from_pretrained(
             MODEL_DIR / "qwen-image",
@@ -177,6 +178,21 @@ def load_qwen_image():
         pipe.enable_model_cpu_offload()
         _models["qwen_image"] = pipe
     return _models["qwen_image"]
+
+
+def load_qwen_image_edit():
+    """Load Qwen-Image-Edit-2511 for img2img editing."""
+    if "qwen_image_edit" not in _models:
+        clear_vram()
+        print("Loading Qwen-Image-Edit-2511 (img2img)...")
+        from diffusers import QwenImageEditPipeline
+        pipe = QwenImageEditPipeline.from_pretrained(
+            MODEL_DIR / "qwen-image-edit",
+            torch_dtype=torch.bfloat16,
+        )
+        pipe.enable_model_cpu_offload()
+        _models["qwen_image_edit"] = pipe
+    return _models["qwen_image_edit"]
 
 
 def _run_image_generation(job_id: str, req: dict):
@@ -241,13 +257,14 @@ async def generate_image(req: GenerateImageRequest):
 # =============================================================================
 
 def _run_image_edit(job_id: str, req: dict):
-    """Background worker for image editing/reposing."""
+    """Background worker for image editing/reposing using Qwen-Image-Edit-2511."""
     try:
         from PIL import Image
 
         update_job(job_id, status="running", progress=5)
 
-        pipe = load_qwen_image()
+        # Use the dedicated edit model
+        pipe = load_qwen_image_edit()
         update_job(job_id, progress=10)
 
         # Decode input image
@@ -258,27 +275,21 @@ def _run_image_edit(job_id: str, req: dict):
         seed = req.get("seed", -1)
         generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
 
-        strength = req.get("strength", 0.7)
-        # Calculate actual steps based on strength
         total_steps = req.get("num_steps", 28)
-        actual_steps = int(total_steps * strength)
-        actual_steps = max(1, actual_steps)
 
         # Create progress callback
         def progress_callback(pipe, step, timestep, callback_kwargs):
-            progress = 10 + int((step / actual_steps) * 85)
+            progress = 10 + int((step / total_steps) * 85)
             update_job(job_id, progress=progress)
             return callback_kwargs
 
-        # img2img: provide image and strength
-        # The pipeline will add noise to the image based on strength, then denoise
+        # QwenImageEditPipeline: provide source image and edit prompt
         image = pipe(
             prompt=req["prompt"],
             negative_prompt=req.get("negative_prompt") or None,
             image=input_image,
-            strength=strength,
-            width=req.get("width", 1024),
             height=req.get("height", 1024),
+            width=req.get("width", 1024),
             num_inference_steps=total_steps,
             true_cfg_scale=req.get("guidance", 3.5),
             generator=generator,

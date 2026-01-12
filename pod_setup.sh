@@ -70,8 +70,11 @@ os.environ["HF_HOME"] = "/workspace/models"
 
 from huggingface_hub import snapshot_download
 
-print("Downloading Qwen-Image-2512...")
+print("Downloading Qwen-Image-2512 (text-to-image)...")
 snapshot_download("Qwen/Qwen-Image-2512", local_dir="/workspace/models/qwen-image")
+
+print("Downloading Qwen-Image-Edit-2511 (img2img editing)...")
+snapshot_download("Qwen/Qwen-Image-Edit-2511", local_dir="/workspace/models/qwen-image-edit")
 
 print("Downloading Wan 2.2 I2V...")
 snapshot_download("Wan-AI/Wan2.2-I2V-A14B", local_dir="/workspace/models/wan-i2v")
