@@ -275,7 +275,8 @@ def _run_image_edit(job_id: str, req: dict):
         seed = req.get("seed", -1)
         generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
 
-        total_steps = req.get("num_steps", 28)
+        # Optimal settings for Qwen-Image-Edit-2511
+        total_steps = req.get("num_steps", 40)  # Recommended: 40 steps
 
         # Create progress callback
         def progress_callback(pipe, step, timestep, callback_kwargs):
@@ -283,15 +284,17 @@ def _run_image_edit(job_id: str, req: dict):
             update_job(job_id, progress=progress)
             return callback_kwargs
 
-        # QwenImageEditPipeline: provide source image and edit prompt
+        # QwenImageEditPipeline: optimized parameters per official docs
+        # Note: minimal negative_prompt recommended for this model
         image = pipe(
             prompt=req["prompt"],
-            negative_prompt=req.get("negative_prompt") or None,
+            negative_prompt=req.get("negative_prompt") or " ",  # Space = minimal negative guidance
             image=input_image,
             height=req.get("height", 1024),
             width=req.get("width", 1024),
             num_inference_steps=total_steps,
-            true_cfg_scale=req.get("guidance", 3.5),
+            guidance_scale=1.0,  # Recommended: 1.0
+            true_cfg_scale=req.get("guidance", 4.0),  # Recommended: 4.0
             generator=generator,
             callback_on_step_end=progress_callback,
         ).images[0]
