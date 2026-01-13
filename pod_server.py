@@ -371,10 +371,10 @@ def load_qwen_image_edit_plus():
             clear_vram()
             print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
             from diffusers import QwenImageEditPlusPipeline
-            # Use float16 instead of bfloat16 to avoid dtype mismatch in vision encoder
+            # Try bfloat16 for Plus pipeline - float16 may cause black images
             pipe = QwenImageEditPlusPipeline.from_pretrained(
                 MODEL_DIR / "qwen-image-edit",
-                torch_dtype=torch.float16,
+                torch_dtype=torch.bfloat16,
             )
             pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
             _models["qwen_image_edit_plus"] = pipe
