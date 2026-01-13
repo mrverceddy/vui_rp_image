@@ -310,6 +310,8 @@ class CharacterVariationRequest(BaseModel):
     """
     reference_image_base64: str  # Reference image of the character
     prompt: str  # Description of the new pose/scene (e.g., "the character is sitting on a bench")
+    negative_prompt: str = ""  # Things to avoid (e.g., "extra arms, wrong clothing")
+    enhanced_prompt: str = ""  # VLM-suggested details to add (e.g., "wearing blue dress")
     width: int = 1280  # Match Wan 2.2 video output (16:9)
     height: int = 720
     num_steps: int = 20  # WWAA uses 20 steps
@@ -589,12 +591,24 @@ def _run_character_variation(job_id: str, req: dict):
             update_job(job_id, progress=progress)
             return callback_kwargs
 
+        # Build prompt with VLM enhancements if provided
+        base_prompt = req["prompt"]
+        enhanced = req.get("enhanced_prompt", "").strip()
+        if enhanced:
+            # Prepend VLM-suggested details (e.g., "wearing blue dress with white collar")
+            base_prompt = f"{enhanced}, {base_prompt}"
+
+        # Build negative prompt with VLM suggestions if provided
+        neg_prompt = req.get("negative_prompt", "").strip()
+        if not neg_prompt:
+            neg_prompt = " "  # Minimal negative prompt for this model
+
         # QwenImageEditPlusPipeline: reference image as conditioning
         # Key difference: image is passed as list for conditioning, NOT init latent
         output = pipe(
             image=[ref_image],  # Reference image as conditioning (list!)
-            prompt=req["prompt"],
-            negative_prompt=" ",  # Minimal negative prompt
+            prompt=base_prompt,
+            negative_prompt=neg_prompt,
             num_inference_steps=total_steps,
             guidance_scale=1.0,  # WWAA uses guidance_scale=1.0
             true_cfg_scale=req.get("cfg", 4.0),  # WWAA uses cfg=4
