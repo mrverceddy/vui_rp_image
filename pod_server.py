@@ -235,9 +235,10 @@ def load_qwen_image_edit_plus():
         clear_vram()
         print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
         from diffusers import QwenImageEditPlusPipeline
+        # Use float16 instead of bfloat16 to avoid dtype mismatch in vision encoder
         pipe = QwenImageEditPlusPipeline.from_pretrained(
             MODEL_DIR / "qwen-image-edit",
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float16,
         )
         pipe.enable_model_cpu_offload()
         _models["qwen_image_edit_plus"] = pipe
@@ -836,6 +837,110 @@ async def train_lora(req: TrainLoRARequest):
         "path": str(lora_path),
         "size_mb": lora_path.stat().st_size / (1024*1024),
         "log": result.stdout[-1000:],
+    }
+
+
+class TrainLoRABase64Request(BaseModel):
+    """Request for LoRA training from base64 encoded images."""
+    dataset: list  # List of {"image_base64": str, "caption": str, "filename": str}
+    lora_name: str
+    trigger_word: str
+    num_epochs: int = 10
+    learning_rate: float = 1e-4
+    network_rank: int = 32
+    network_alpha: int = 16
+    resolution: int = 1024
+
+
+@app.post("/train_lora_from_base64")
+async def train_lora_from_base64(req: TrainLoRABase64Request):
+    """Train LoRA from base64 encoded images with captions.
+
+    Accepts images directly as base64 (no URL/zip needed).
+    Each item in dataset should have: image_base64, caption, filename
+    """
+    import shutil
+
+    clear_vram()
+
+    # Setup directories
+    dataset_dir = Path("/tmp/dataset_b64")
+    images_dir = dataset_dir / "images"
+    output_dir = Path("/workspace/loras")
+
+    # Clean previous dataset
+    if dataset_dir.exists():
+        shutil.rmtree(dataset_dir)
+
+    images_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
+
+    # Write images and captions
+    for i, item in enumerate(req.dataset):
+        img_b64 = item.get("image_base64", "")
+        caption = item.get("caption", "")
+        filename = item.get("filename", f"image_{i:03d}.png")
+
+        if not img_b64:
+            continue
+
+        # Get base name without extension
+        base_name = Path(filename).stem
+
+        # Write image
+        img_path = images_dir / filename
+        img_path.write_bytes(base64.b64decode(img_b64))
+
+        # Write caption (same name but .txt)
+        caption_path = images_dir / f"{base_name}.txt"
+        caption_path.write_text(caption)
+
+    # Count valid images
+    image_count = len(list(images_dir.glob("*.png"))) + len(list(images_dir.glob("*.jpg")))
+    if image_count < 5:
+        raise HTTPException(400, f"Need at least 5 images, got {image_count}")
+
+    print(f"Training LoRA '{req.lora_name}' with {image_count} images...")
+
+    # Run training
+    cmd = [
+        "accelerate", "launch",
+        "/workspace/sd-scripts/sdxl_train_network.py",
+        "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-xl-base-1.0",
+        "--train_data_dir", str(images_dir),
+        "--output_dir", str(output_dir),
+        "--output_name", req.lora_name,
+        "--max_train_epochs", str(req.num_epochs),
+        "--learning_rate", str(req.learning_rate),
+        "--network_dim", str(req.network_rank),
+        "--network_alpha", str(req.network_alpha),
+        "--resolution", f"{req.resolution},{req.resolution}",
+        "--mixed_precision", "bf16",
+        "--network_module", "networks.lora",
+        "--cache_latents",
+        "--train_batch_size", "1",
+        "--gradient_accumulation_steps", "4",
+        "--save_every_n_epochs", "5",
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+
+    lora_path = output_dir / f"{req.lora_name}.safetensors"
+
+    if not lora_path.exists():
+        raise HTTPException(500, f"Training failed: {result.stderr[-1000:]}")
+
+    # Read LoRA and encode as base64
+    lora_data = lora_path.read_bytes()
+    lora_b64 = base64.b64encode(lora_data).decode()
+
+    return {
+        "lora_base64": lora_b64,
+        "lora_path": str(lora_path),
+        "lora_size_mb": len(lora_data) / (1024 * 1024),
+        "training_log": result.stdout[-2000:],
+        "trigger_word": req.trigger_word,
+        "images_trained": image_count,
     }
 
 
