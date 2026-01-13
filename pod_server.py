@@ -7,6 +7,7 @@ Access at: http://POD_IP:8000
 All GPU tasks available via REST API with async job queue.
 """
 
+import asyncio
 import base64
 import gc
 import io
@@ -21,7 +22,7 @@ from uuid import uuid4
 
 import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -40,6 +41,19 @@ _jobs = {}  # job_id -> {status, progress, result, error, created_at}
 _executor = ThreadPoolExecutor(max_workers=1)  # Single worker for GPU tasks
 _job_lock = threading.Lock()
 
+# Client tracking for auto-offload
+_active_clients = set()  # Set of active client IDs
+_offload_task = None  # Asyncio task for delayed offload
+IDLE_OFFLOAD_DELAY = 120  # Seconds to wait before offloading after idle
+
+# Model loading state tracking
+_model_loading = False
+_model_loading_lock = threading.Lock()
+
+# Request deduplication
+_pending_request_hashes = set()
+_request_hash_lock = threading.Lock()
+
 
 def clear_vram():
     """Unload all models to free VRAM."""
@@ -51,12 +65,50 @@ def clear_vram():
     torch.cuda.empty_cache()
 
 
+def set_model_loading(loading: bool):
+    """Set model loading state."""
+    global _model_loading
+    with _model_loading_lock:
+        _model_loading = loading
+
+
+def is_model_loading() -> bool:
+    """Check if a model is currently loading."""
+    with _model_loading_lock:
+        return _model_loading
+
+
+def get_request_hash(req_dict: dict) -> str:
+    """Generate a hash for request deduplication."""
+    import hashlib
+    import json
+    # Only hash the key parameters that define uniqueness
+    key_params = {k: v for k, v in req_dict.items() if k not in ("seed",)}
+    return hashlib.md5(json.dumps(key_params, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def add_pending_request(req_hash: str) -> bool:
+    """Add request hash if not already pending. Returns True if added (new request)."""
+    with _request_hash_lock:
+        if req_hash in _pending_request_hashes:
+            return False
+        _pending_request_hashes.add(req_hash)
+        return True
+
+
+def remove_pending_request(req_hash: str):
+    """Remove request hash when job completes."""
+    with _request_hash_lock:
+        _pending_request_hashes.discard(req_hash)
+
+
 # =============================================================================
 # JOB QUEUE SYSTEM
 # =============================================================================
 
 def create_job() -> str:
     """Create a new job and return its ID."""
+    _cancel_offload()  # Cancel any pending offload when new work arrives
     job_id = uuid4().hex[:12]
     with _job_lock:
         _jobs[job_id] = {
@@ -74,6 +126,9 @@ def update_job(job_id: str, **kwargs):
     with _job_lock:
         if job_id in _jobs:
             _jobs[job_id].update(kwargs)
+    # Schedule offload check when job completes or fails
+    if kwargs.get("status") in ("complete", "failed"):
+        _schedule_offload_if_idle()
 
 
 def get_job(job_id: str) -> dict:
@@ -92,6 +147,77 @@ def cleanup_old_jobs(max_age_seconds: int = 3600):
         ]
         for jid in to_remove:
             del _jobs[jid]
+
+
+# =============================================================================
+# AUTO-OFFLOAD WHEN IDLE
+# =============================================================================
+
+def _has_pending_jobs() -> bool:
+    """Check if there are any pending or running jobs."""
+    with _job_lock:
+        return any(
+            job["status"] in ("pending", "running")
+            for job in _jobs.values()
+        )
+
+
+async def _delayed_offload():
+    """Offload models after idle timeout if no active clients or jobs."""
+    global _offload_task
+    try:
+        await asyncio.sleep(IDLE_OFFLOAD_DELAY)
+        if not _active_clients and not _has_pending_jobs():
+            print(f"No active clients for {IDLE_OFFLOAD_DELAY}s - offloading models...")
+            clear_vram()
+            print("Models offloaded to free VRAM")
+    except asyncio.CancelledError:
+        pass  # Offload was cancelled because new work arrived
+    finally:
+        _offload_task = None
+
+
+def _cancel_offload():
+    """Cancel any pending offload task."""
+    global _offload_task
+    if _offload_task and not _offload_task.done():
+        _offload_task.cancel()
+        _offload_task = None
+
+
+def _schedule_offload_if_idle():
+    """Schedule offload if no active clients."""
+    global _offload_task
+    if not _active_clients and not _has_pending_jobs():
+        if _offload_task is None:
+            try:
+                loop = asyncio.get_event_loop()
+                _offload_task = loop.create_task(_delayed_offload())
+            except RuntimeError:
+                pass  # No event loop running
+
+
+def register_client(client_id: str):
+    """Register an active client and cancel any pending offload."""
+    _active_clients.add(client_id)
+    _cancel_offload()
+
+
+def unregister_client(client_id: str):
+    """Unregister a client and schedule offload if idle."""
+    _active_clients.discard(client_id)
+    _schedule_offload_if_idle()
+
+
+@app.post("/signal_batch_complete")
+async def signal_batch_complete(client_id: str = "unknown"):
+    """UI signals its batch is complete. Triggers offload if all clients done."""
+    unregister_client(client_id)
+    return {
+        "status": "acknowledged",
+        "active_clients": len(_active_clients),
+        "offload_scheduled": _offload_task is not None,
+    }
 
 
 @app.get("/job/{job_id}")
@@ -198,30 +324,38 @@ class CharacterVariationRequest(BaseModel):
 def load_qwen_image():
     """Load Qwen-Image-2512 for text-to-image generation."""
     if "qwen_image" not in _models:
-        clear_vram()
-        print("Loading Qwen-Image-2512 (text-to-image)...")
-        from diffusers import DiffusionPipeline
-        pipe = DiffusionPipeline.from_pretrained(
-            MODEL_DIR / "qwen-image",
-            torch_dtype=torch.bfloat16,
-        )
-        pipe.enable_model_cpu_offload()
-        _models["qwen_image"] = pipe
+        set_model_loading(True)
+        try:
+            clear_vram()
+            print("Loading Qwen-Image-2512 (text-to-image)...")
+            from diffusers import DiffusionPipeline
+            pipe = DiffusionPipeline.from_pretrained(
+                MODEL_DIR / "qwen-image",
+                torch_dtype=torch.float16,
+            )
+            pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
+            _models["qwen_image"] = pipe
+        finally:
+            set_model_loading(False)
     return _models["qwen_image"]
 
 
 def load_qwen_image_edit():
     """Load Qwen-Image-Edit-2511 for img2img editing."""
     if "qwen_image_edit" not in _models:
-        clear_vram()
-        print("Loading Qwen-Image-Edit-2511 (img2img)...")
-        from diffusers import QwenImageEditPipeline
-        pipe = QwenImageEditPipeline.from_pretrained(
-            MODEL_DIR / "qwen-image-edit",
-            torch_dtype=torch.bfloat16,
-        )
-        pipe.enable_model_cpu_offload()
-        _models["qwen_image_edit"] = pipe
+        set_model_loading(True)
+        try:
+            clear_vram()
+            print("Loading Qwen-Image-Edit-2511 (img2img)...")
+            from diffusers import QwenImageEditPipeline
+            pipe = QwenImageEditPipeline.from_pretrained(
+                MODEL_DIR / "qwen-image-edit",
+                torch_dtype=torch.float16,
+            )
+            pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
+            _models["qwen_image_edit"] = pipe
+        finally:
+            set_model_loading(False)
     return _models["qwen_image_edit"]
 
 
@@ -232,45 +366,53 @@ def load_qwen_image_edit_plus():
     Generates new images from scratch that maintain character consistency.
     """
     if "qwen_image_edit_plus" not in _models:
-        clear_vram()
-        print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
-        from diffusers import QwenImageEditPlusPipeline
-        # Use float16 instead of bfloat16 to avoid dtype mismatch in vision encoder
-        pipe = QwenImageEditPlusPipeline.from_pretrained(
-            MODEL_DIR / "qwen-image-edit",
-            torch_dtype=torch.float16,
-        )
-        pipe.enable_model_cpu_offload()
-        _models["qwen_image_edit_plus"] = pipe
+        set_model_loading(True)
+        try:
+            clear_vram()
+            print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
+            from diffusers import QwenImageEditPlusPipeline
+            # Use float16 instead of bfloat16 to avoid dtype mismatch in vision encoder
+            pipe = QwenImageEditPlusPipeline.from_pretrained(
+                MODEL_DIR / "qwen-image-edit",
+                torch_dtype=torch.float16,
+            )
+            pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
+            _models["qwen_image_edit_plus"] = pipe
+        finally:
+            set_model_loading(False)
     return _models["qwen_image_edit_plus"]
 
 
 def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
     """Load Qwen-Image-Edit-2511 with Multiple Angles LoRA for camera control."""
     if "qwen_image_edit_angles" not in _models:
-        clear_vram()
-        print("Loading Qwen-Image-Edit-2511 with Multiple Angles LoRA...")
-        from diffusers import QwenImageEditPipeline
+        set_model_loading(True)
+        try:
+            clear_vram()
+            print("Loading Qwen-Image-Edit-2511 with Multiple Angles LoRA...")
+            from diffusers import QwenImageEditPipeline
 
-        pipe = QwenImageEditPipeline.from_pretrained(
-            MODEL_DIR / "qwen-image-edit",
-            torch_dtype=torch.bfloat16,
-        )
+            pipe = QwenImageEditPipeline.from_pretrained(
+                MODEL_DIR / "qwen-image-edit",
+                torch_dtype=torch.float16,
+            )
 
-        # Load the Multiple Angles LoRA
-        lora_path = MODEL_DIR / "loras" / "multiple-angles"
-        lora_file = lora_path / "qwen-image-edit-2511-multiple-angles-lora.safetensors"
+            # Load the Multiple Angles LoRA
+            lora_path = MODEL_DIR / "loras" / "multiple-angles"
+            lora_file = lora_path / "qwen-image-edit-2511-multiple-angles-lora.safetensors"
 
-        if lora_file.exists():
-            print(f"Loading Multiple Angles LoRA from {lora_file}...")
-            pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
-            pipe.fuse_lora(lora_scale=lora_strength)
-            print(f"LoRA loaded with strength {lora_strength}")
-        else:
-            print(f"Warning: LoRA file not found at {lora_file}, using base model")
+            if lora_file.exists():
+                print(f"Loading Multiple Angles LoRA from {lora_file}...")
+                pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
+                pipe.fuse_lora(lora_scale=lora_strength)
+                print(f"LoRA loaded with strength {lora_strength}")
+            else:
+                print(f"Warning: LoRA file not found at {lora_file}, using base model")
 
-        pipe.enable_model_cpu_offload()
-        _models["qwen_image_edit_angles"] = pipe
+            pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
+            _models["qwen_image_edit_angles"] = pipe
+        finally:
+            set_model_loading(False)
     return _models["qwen_image_edit_angles"]
 
 
@@ -619,16 +761,21 @@ async def generate_scene_angle(req: SceneAngleRequest):
 # =============================================================================
 
 def load_wan():
+    """Load Wan 2.1 FLF2V for video generation."""
     if "wan" not in _models:
-        clear_vram()
-        print("Loading Wan 2.1 FLF2V...")
-        from diffusers import WanFLFToVideoPipeline
-        pipe = WanFLFToVideoPipeline.from_pretrained(
-            MODEL_DIR / "wan-flf2v",
-            torch_dtype=torch.bfloat16,
-        )
-        pipe.enable_model_cpu_offload()
-        _models["wan"] = pipe
+        set_model_loading(True)
+        try:
+            clear_vram()
+            print("Loading Wan 2.1 FLF2V...")
+            from diffusers import WanFLFToVideoPipeline
+            pipe = WanFLFToVideoPipeline.from_pretrained(
+                MODEL_DIR / "wan-flf2v",
+                torch_dtype=torch.float16,
+            )
+            pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
+            _models["wan"] = pipe
+        finally:
+            set_model_loading(False)
     return _models["wan"]
 
 
@@ -956,7 +1103,30 @@ async def health():
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none",
         "vram_gb": torch.cuda.get_device_properties(0).total_memory / 1e9 if torch.cuda.is_available() else 0,
         "models_loaded": list(_models.keys()),
+        "model_loading": is_model_loading(),
         "active_jobs": len([j for j in _jobs.values() if j["status"] in ("pending", "running")]),
+    }
+
+
+@app.get("/queue_status")
+async def queue_status():
+    """Get detailed queue status for monitoring."""
+    with _job_lock:
+        pending = len([j for j in _jobs.values() if j["status"] == "pending"])
+        running = len([j for j in _jobs.values() if j["status"] == "running"])
+        completed = len([j for j in _jobs.values() if j["status"] == "complete"])
+        failed = len([j for j in _jobs.values() if j["status"] == "failed"])
+
+    return {
+        "pending_jobs": pending,
+        "running_jobs": running,
+        "completed_jobs": completed,
+        "failed_jobs": failed,
+        "model_loading": is_model_loading(),
+        "models_loaded": list(_models.keys()),
+        "active_clients": len(_active_clients),
+        "offload_scheduled": _offload_task is not None,
+        "pending_request_hashes": len(_pending_request_hashes),
     }
 
 
