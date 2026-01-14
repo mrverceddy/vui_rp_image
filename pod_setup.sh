@@ -62,11 +62,11 @@ if [ ! -d "/workspace/sd-scripts" ]; then
     cd /workspace/sd-scripts && pip install -r requirements.txt
 fi
 
-# IMPORTANT: Re-install diffusers from git LAST to ensure QwenImagePipeline is available
-# (other packages like kohya may install older diffusers)
-echo "Re-installing latest diffusers from git (for Qwen pipelines)..."
+# IMPORTANT: Re-install core ML stack LAST to ensure compatibility
+# (other packages like kohya may install older/incompatible versions)
+echo "Re-installing latest ML stack (diffusers, transformers, accelerate)..."
+pip install --upgrade transformers huggingface-hub accelerate
 pip install --force-reinstall git+https://github.com/huggingface/diffusers.git
-pip install --upgrade accelerate>=1.2.0
 
 echo "=== Downloading Models ==="
 
