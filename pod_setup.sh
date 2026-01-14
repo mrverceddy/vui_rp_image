@@ -62,6 +62,12 @@ if [ ! -d "/workspace/sd-scripts" ]; then
     cd /workspace/sd-scripts && pip install -r requirements.txt
 fi
 
+# IMPORTANT: Re-install diffusers from git LAST to ensure QwenImagePipeline is available
+# (other packages like kohya may install older diffusers)
+echo "Re-installing latest diffusers from git (for Qwen pipelines)..."
+pip install --force-reinstall git+https://github.com/huggingface/diffusers.git
+pip install --upgrade accelerate>=1.2.0
+
 echo "=== Downloading Models ==="
 
 # Download models (this takes a while first time)
