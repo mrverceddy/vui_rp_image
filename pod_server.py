@@ -236,10 +236,10 @@ async def get_job_status(job_id: str):
 class GenerateImageRequest(BaseModel):
     prompt: str
     negative_prompt: str = ""
-    width: int = 1280  # 16:9 720p for video compatibility
-    height: int = 720
-    num_steps: int = 28
-    guidance: float = 3.5
+    width: int = 1664  # 16:9 - Qwen-Image supported resolution
+    height: int = 928
+    num_steps: int = 50  # Recommended for Qwen-Image
+    guidance: float = 4.0  # Recommended true_cfg_scale
     seed: int = -1
 
 
@@ -248,10 +248,10 @@ class EditImageRequest(BaseModel):
     prompt: str
     negative_prompt: str = ""
     strength: float = 0.7  # How much to change (0.0 = no change, 1.0 = full regeneration)
-    width: int = 1280  # 16:9 720p for video compatibility
-    height: int = 720
-    num_steps: int = 28
-    guidance: float = 3.5
+    width: int = 1664  # 16:9 - Qwen supported resolution
+    height: int = 928
+    num_steps: int = 40
+    guidance: float = 4.0
     seed: int = -1
 
 
@@ -294,8 +294,8 @@ class SceneAngleRequest(BaseModel):
     elevation: str = "eye-level shot"  # low-angle shot, eye-level shot, elevated shot, high-angle shot
     distance: str = "medium shot"  # close-up, medium shot, wide shot
     additional_prompt: str = ""  # Optional additional context
-    width: int = 1280  # 16:9 720p for video compatibility
-    height: int = 720
+    width: int = 1664  # 16:9 - Qwen supported resolution
+    height: int = 928
     num_steps: int = 40
     guidance: float = 4.0
     lora_strength: float = 0.9
@@ -410,12 +410,14 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
             if lora_file.exists():
                 print(f"Loading Multiple Angles LoRA from {lora_file}...")
                 pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
-                pipe.fuse_lora(lora_scale=lora_strength)
-                print(f"LoRA fused with strength {lora_strength}")
+                # Use set_adapters instead of fuse_lora (per HF docs)
+                pipe.set_adapters(["default"], adapter_weights=[lora_strength])
+                print(f"LoRA loaded with strength {lora_strength}")
             else:
                 print(f"Warning: LoRA file not found at {lora_file}, using base model")
 
             _models["qwen_image_edit_angles"] = pipe
+            _models["qwen_image_edit_angles_strength"] = lora_strength
         finally:
             set_model_loading(False)
     return _models["qwen_image_edit_angles"]
