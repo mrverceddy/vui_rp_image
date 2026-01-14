@@ -236,8 +236,8 @@ async def get_job_status(job_id: str):
 class GenerateImageRequest(BaseModel):
     prompt: str
     negative_prompt: str = ""
-    width: int = 1024
-    height: int = 1024
+    width: int = 1280  # 16:9 720p for video compatibility
+    height: int = 720
     num_steps: int = 28
     guidance: float = 3.5
     seed: int = -1
@@ -248,8 +248,8 @@ class EditImageRequest(BaseModel):
     prompt: str
     negative_prompt: str = ""
     strength: float = 0.7  # How much to change (0.0 = no change, 1.0 = full regeneration)
-    width: int = 1024
-    height: int = 1024
+    width: int = 1280  # 16:9 720p for video compatibility
+    height: int = 720
     num_steps: int = 28
     guidance: float = 3.5
     seed: int = -1
@@ -294,8 +294,8 @@ class SceneAngleRequest(BaseModel):
     elevation: str = "eye-level shot"  # low-angle shot, eye-level shot, elevated shot, high-angle shot
     distance: str = "medium shot"  # close-up, medium shot, wide shot
     additional_prompt: str = ""  # Optional additional context
-    width: int = 1024
-    height: int = 1024
+    width: int = 1280  # 16:9 720p for video compatibility
+    height: int = 720
     num_steps: int = 40
     guidance: float = 4.0
     lora_strength: float = 0.9
