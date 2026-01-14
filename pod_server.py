@@ -399,6 +399,10 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
                 torch_dtype=torch.float16,
             )
 
+            # Move to GPU FIRST before LoRA operations (much faster)
+            pipe.to("cuda")
+            print("Model loaded to GPU")
+
             # Load the Multiple Angles LoRA
             lora_path = MODEL_DIR / "loras" / "multiple-angles"
             lora_file = lora_path / "qwen-image-edit-2511-multiple-angles-lora.safetensors"
@@ -407,11 +411,10 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
                 print(f"Loading Multiple Angles LoRA from {lora_file}...")
                 pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
                 pipe.fuse_lora(lora_scale=lora_strength)
-                print(f"LoRA loaded with strength {lora_strength}")
+                print(f"LoRA fused with strength {lora_strength}")
             else:
                 print(f"Warning: LoRA file not found at {lora_file}, using base model")
 
-            pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
             _models["qwen_image_edit_angles"] = pipe
         finally:
             set_model_loading(False)
