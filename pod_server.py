@@ -413,8 +413,9 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
             if lora_file.exists():
                 print(f"Loading Multiple Angles LoRA from {lora_file}...")
                 pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
-                # LoRA is auto-activated as first adapter. Strength applied via cross_attention_kwargs at inference.
-                print(f"LoRA loaded (strength {lora_strength} will be applied at inference)")
+                # Set LoRA strength using set_adapters (adapter name is "default_0" for first loaded LoRA)
+                pipe.set_adapters(["default_0"], adapter_weights=[lora_strength])
+                print(f"LoRA loaded with strength {lora_strength}")
             else:
                 print(f"Warning: LoRA file not found at {lora_file}, using base model")
 
@@ -725,6 +726,7 @@ def _run_scene_angle(job_id: str, req: dict):
 
         lora_strength = req.get("lora_strength", 0.9)
         print(f"[{job_id}] Running pipeline with LoRA strength {lora_strength}...")
+        # LoRA strength is set at model load time via set_adapters()
         image = pipe(
             prompt=prompt,
             negative_prompt=" ",  # Minimal negative prompt for this model
@@ -736,7 +738,6 @@ def _run_scene_angle(job_id: str, req: dict):
             true_cfg_scale=req.get("guidance", 4.0),
             generator=generator,
             callback_on_step_end=progress_callback,
-            cross_attention_kwargs={"scale": lora_strength},  # Apply LoRA strength
         ).images[0]
 
         print(f"[{job_id}] Inference complete, saving image...")
