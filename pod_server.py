@@ -372,7 +372,8 @@ def load_qwen_image_edit_plus():
     if "qwen_image_edit_plus" not in _models:
         set_model_loading(True)
         try:
-            # Don't clear VRAM - A100 80GB can hold multiple models
+            # Clear other models to free VRAM (keep only one major model at a time)
+            clear_vram()
             print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
             from diffusers import QwenImageEditPlusPipeline
             # Try bfloat16 for Plus pipeline - float16 may cause black images
@@ -392,7 +393,8 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
     if "qwen_image_edit_angles" not in _models:
         set_model_loading(True)
         try:
-            # Don't clear VRAM - A100 80GB can hold multiple models
+            # Clear other models to free VRAM (keep only one major model at a time)
+            clear_vram()
             print("Loading Qwen-Image-Edit-2511 with Multiple Angles LoRA...")
             from diffusers import QwenImageEditPipeline
 
