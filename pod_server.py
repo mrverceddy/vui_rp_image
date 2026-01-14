@@ -429,18 +429,27 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
 def _run_image_generation(job_id: str, req: dict):
     """Background worker for image generation."""
     try:
+        print(f"[{job_id}] Starting text-to-image generation...")
         update_job(job_id, status="running", progress=5)
 
+        print(f"[{job_id}] Loading Qwen-Image-2512...")
         pipe = load_qwen_image()
+        print(f"[{job_id}] Model loaded, dtype: {pipe.transformer.dtype}")
         update_job(job_id, progress=10)
 
         seed = req.get("seed", -1)
         generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
 
+        total_steps = req.get("num_steps", 28)
+        print(f"[{job_id}] Prompt: {req['prompt'][:100]}...")
+        print(f"[{job_id}] Starting inference with {total_steps} steps...")
+
         # Create progress callback
         def progress_callback(pipe, step, timestep, callback_kwargs):
-            progress = 10 + int((step / req.get("num_steps", 28)) * 85)
+            progress = 10 + int((step / total_steps) * 85)
             update_job(job_id, progress=progress)
+            if step % 10 == 0:
+                print(f"[{job_id}] Step {step}/{total_steps}")
             return callback_kwargs
 
         image = pipe(
@@ -448,11 +457,13 @@ def _run_image_generation(job_id: str, req: dict):
             negative_prompt=req.get("negative_prompt") or None,
             width=req.get("width", 1024),
             height=req.get("height", 1024),
-            num_inference_steps=req.get("num_steps", 28),
+            num_inference_steps=total_steps,
             true_cfg_scale=req.get("guidance", 3.5),
             generator=generator,
             callback_on_step_end=progress_callback,
         ).images[0]
+
+        print(f"[{job_id}] Inference complete!")
 
         update_job(job_id, progress=95)
 
@@ -563,6 +574,105 @@ async def edit_image(req: EditImageRequest):
     """
     job_id = create_job()
     _executor.submit(_run_image_edit, job_id, req.model_dump())
+    return {"job_id": job_id, "status": "pending"}
+
+
+# =============================================================================
+# TEXT-TO-IMAGE V2 (Using working QwenImageEditPlusPipeline with noise reference)
+# =============================================================================
+
+def _run_image_generation_v2(job_id: str, req: dict):
+    """Text-to-image using QwenImageEditPlusPipeline with noise reference.
+
+    Uses the working edit model instead of broken Qwen-Image-2512.
+    Generates from noise/placeholder reference for pure text-to-image.
+    """
+    try:
+        from PIL import Image
+        import numpy as np
+
+        print(f"[{job_id}] Starting text-to-image v2 (using edit model)...")
+        update_job(job_id, status="running", progress=5)
+
+        # Load the Plus pipeline (reference conditioning)
+        print(f"[{job_id}] Loading QwenImageEditPlusPipeline...")
+        pipe = load_qwen_image_edit_plus()
+        print(f"[{job_id}] Model loaded, dtype: {pipe.transformer.dtype}")
+        update_job(job_id, progress=15)
+
+        # Create noise reference image (model will mostly ignore it with good prompt)
+        width = req.get("width", 1664)
+        height = req.get("height", 928)
+        noise_array = np.random.randint(128, 192, (height, width, 3), dtype=np.uint8)
+        ref_image = Image.fromarray(noise_array, mode="RGB")
+
+        seed = req.get("seed", -1)
+        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+
+        total_steps = req.get("num_steps", 30)
+        print(f"[{job_id}] Prompt: {req['prompt'][:100]}...")
+        print(f"[{job_id}] Starting inference with {total_steps} steps...")
+
+        def progress_callback(pipe, step, timestep, callback_kwargs):
+            progress = 15 + int((step / total_steps) * 80)
+            update_job(job_id, progress=progress)
+            if step % 10 == 0:
+                print(f"[{job_id}] Step {step}/{total_steps}")
+            return callback_kwargs
+
+        neg_prompt = req.get("negative_prompt", "").strip() or " "
+
+        output = pipe(
+            image=[ref_image],  # Noise reference (will be mostly overridden by prompt)
+            prompt=req["prompt"],
+            negative_prompt=neg_prompt,
+            num_inference_steps=total_steps,
+            guidance_scale=1.0,
+            true_cfg_scale=req.get("guidance", 4.0),
+            height=height,
+            width=width,
+            generator=generator,
+            num_images_per_prompt=1,
+            callback_on_step_end=progress_callback,
+        )
+
+        image = output.images[0]
+        print(f"[{job_id}] Inference complete!")
+        update_job(job_id, progress=95)
+
+        # Save and encode
+        path = OUTPUT_DIR / f"image_v2_{job_id}.png"
+        image.save(path)
+        print(f"[{job_id}] Image saved to {path}")
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        image_b64 = base64.b64encode(buffer.getvalue()).decode()
+
+        update_job(
+            job_id,
+            status="complete",
+            progress=100,
+            result={"image_base64": image_b64, "path": str(path), "seed": seed},
+        )
+        print(f"[{job_id}] Text-to-image v2 complete!")
+
+    except Exception as e:
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"[{job_id}] ERROR: {error_msg}")
+        update_job(job_id, status="failed", error=error_msg)
+
+
+@app.post("/generate_image_v2")
+async def generate_image_v2(req: GenerateImageRequest):
+    """Text-to-image using working QwenImageEditPlusPipeline.
+
+    Alternative to /generate_image that uses the working edit model
+    with a noise reference instead of broken Qwen-Image-2512.
+    """
+    job_id = create_job()
+    _executor.submit(_run_image_generation_v2, job_id, req.model_dump())
     return {"job_id": job_id, "status": "pending"}
 
 
