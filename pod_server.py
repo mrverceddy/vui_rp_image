@@ -331,11 +331,12 @@ def load_qwen_image():
             clear_vram()
             print("Loading Qwen-Image-2512 (text-to-image)...")
             from diffusers import DiffusionPipeline
+            # IMPORTANT: Use bfloat16 - float16 causes black images!
             pipe = DiffusionPipeline.from_pretrained(
                 MODEL_DIR / "qwen-image",
-                torch_dtype=torch.float16,
+                torch_dtype=torch.bfloat16,
             )
-            pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
+            pipe.to("cuda")
             _models["qwen_image"] = pipe
         finally:
             set_model_loading(False)
@@ -350,11 +351,12 @@ def load_qwen_image_edit():
             clear_vram()
             print("Loading Qwen-Image-Edit-2511 (img2img)...")
             from diffusers import QwenImageEditPipeline
+            # IMPORTANT: Use bfloat16 - float16 causes black images!
             pipe = QwenImageEditPipeline.from_pretrained(
                 MODEL_DIR / "qwen-image-edit",
-                torch_dtype=torch.float16,
+                torch_dtype=torch.bfloat16,
             )
-            pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
+            pipe.to("cuda")
             _models["qwen_image_edit"] = pipe
         finally:
             set_model_loading(False)
@@ -394,9 +396,10 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
             print("Loading Qwen-Image-Edit-2511 with Multiple Angles LoRA...")
             from diffusers import QwenImageEditPipeline
 
+            # IMPORTANT: Use bfloat16 - float16 causes black images!
             pipe = QwenImageEditPipeline.from_pretrained(
                 MODEL_DIR / "qwen-image-edit",
-                torch_dtype=torch.float16,
+                torch_dtype=torch.bfloat16,
             )
 
             # Move to GPU FIRST before LoRA operations (much faster)
