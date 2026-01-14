@@ -328,7 +328,7 @@ def load_qwen_image():
     if "qwen_image" not in _models:
         set_model_loading(True)
         try:
-            clear_vram()
+            # Don't clear VRAM - A100 80GB can hold multiple models
             print("Loading Qwen-Image-2512 (text-to-image)...")
             from diffusers import DiffusionPipeline
             # IMPORTANT: Use bfloat16 - float16 causes black images!
@@ -348,7 +348,7 @@ def load_qwen_image_edit():
     if "qwen_image_edit" not in _models:
         set_model_loading(True)
         try:
-            clear_vram()
+            # Don't clear VRAM - A100 80GB can hold multiple models
             print("Loading Qwen-Image-Edit-2511 (img2img)...")
             from diffusers import QwenImageEditPipeline
             # IMPORTANT: Use bfloat16 - float16 causes black images!
@@ -372,7 +372,7 @@ def load_qwen_image_edit_plus():
     if "qwen_image_edit_plus" not in _models:
         set_model_loading(True)
         try:
-            clear_vram()
+            # Don't clear VRAM - A100 80GB can hold multiple models
             print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
             from diffusers import QwenImageEditPlusPipeline
             # Try bfloat16 for Plus pipeline - float16 may cause black images
@@ -392,7 +392,7 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
     if "qwen_image_edit_angles" not in _models:
         set_model_loading(True)
         try:
-            clear_vram()
+            # Don't clear VRAM - A100 80GB can hold multiple models
             print("Loading Qwen-Image-Edit-2511 with Multiple Angles LoRA...")
             from diffusers import QwenImageEditPipeline
 
@@ -684,10 +684,13 @@ def _run_scene_angle(job_id: str, req: dict):
     try:
         from PIL import Image
 
+        print(f"[{job_id}] Starting scene angle generation...")
         update_job(job_id, status="running", progress=5)
 
         # Load model with LoRA
+        print(f"[{job_id}] Loading model...")
         pipe = load_qwen_image_edit_with_angles_lora(req.get("lora_strength", 0.9))
+        print(f"[{job_id}] Model loaded, preparing input...")
         update_job(job_id, progress=15)
 
         # Decode input image
@@ -710,13 +713,18 @@ def _run_scene_angle(job_id: str, req: dict):
             prompt = f"{prompt}, {additional}"
 
         total_steps = req.get("num_steps", 40)
+        print(f"[{job_id}] Prompt: {prompt}")
+        print(f"[{job_id}] Starting inference with {total_steps} steps...")
 
         def progress_callback(pipe, step, timestep, callback_kwargs):
             progress = 15 + int((step / total_steps) * 80)
             update_job(job_id, progress=progress)
+            if step % 10 == 0:
+                print(f"[{job_id}] Step {step}/{total_steps}")
             return callback_kwargs
 
         lora_strength = req.get("lora_strength", 0.9)
+        print(f"[{job_id}] Running pipeline with LoRA strength {lora_strength}...")
         image = pipe(
             prompt=prompt,
             negative_prompt=" ",  # Minimal negative prompt for this model
@@ -731,11 +739,13 @@ def _run_scene_angle(job_id: str, req: dict):
             cross_attention_kwargs={"scale": lora_strength},  # Apply LoRA strength
         ).images[0]
 
+        print(f"[{job_id}] Inference complete, saving image...")
         update_job(job_id, progress=95)
 
         # Save and encode
         path = OUTPUT_DIR / f"scene_angle_{job_id}.png"
         image.save(path)
+        print(f"[{job_id}] Image saved to {path}")
 
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
@@ -754,10 +764,13 @@ def _run_scene_angle(job_id: str, req: dict):
                 "distance": distance,
             },
         )
+        print(f"[{job_id}] Scene angle generation complete!")
 
     except Exception as e:
         import traceback
-        update_job(job_id, status="failed", error=f"{str(e)}\n{traceback.format_exc()}")
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"[{job_id}] ERROR: {error_msg}")
+        update_job(job_id, status="failed", error=error_msg)
 
 
 @app.post("/generate_scene_angle")
@@ -788,7 +801,7 @@ def load_wan():
     if "wan" not in _models:
         set_model_loading(True)
         try:
-            clear_vram()
+            # Don't clear VRAM - A100 80GB can hold multiple models
             print("Loading Wan 2.1 FLF2V...")
             from diffusers import WanFLFToVideoPipeline
             pipe = WanFLFToVideoPipeline.from_pretrained(
@@ -881,7 +894,7 @@ async def generate_video(req: GenerateVideoRequest):
 
 def load_parler():
     if "parler" not in _models:
-        clear_vram()
+        # Don't clear VRAM - A100 80GB can hold multiple models
         print("Loading Parler-TTS...")
         from parler_tts import ParlerTTSForConditionalGeneration
         from transformers import AutoTokenizer
@@ -1169,18 +1182,10 @@ async def download(filename: str):
 
 @app.on_event("startup")
 async def startup_preload():
-    """Preload image model on startup."""
-    def preload():
-        print("Preloading Qwen-Image-2512...")
-        try:
-            load_qwen_image()
-            print("Model preloaded and ready!")
-        except Exception as e:
-            print(f"Warning: Failed to preload: {e}")
-
-    thread = threading.Thread(target=preload, daemon=True)
-    thread.start()
-    print("Model preload started in background...")
+    """Startup event - models loaded on-demand now (no preload)."""
+    # Don't preload - let models load on first request
+    # This avoids loading wrong model (text2img vs edit)
+    print("Server ready - models will load on first request")
 
 
 if __name__ == "__main__":
