@@ -15,12 +15,12 @@ if ! python -c "import diffusers" 2>/dev/null; then
     # PyTorch 2.5 with CUDA 12.1
     pip install -q torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
 
-    # Core deps
+    # Core deps - IMPORTANT: huggingface-hub must be <1.0!
     pip install -q \
-        diffusers>=0.36.0 \
-        transformers>=4.50.0 \
-        huggingface_hub>=0.30.0 \
-        accelerate>=1.0.0 \
+        git+https://github.com/huggingface/diffusers.git \
+        "transformers==4.51.3" \
+        "huggingface-hub==0.30.2" \
+        "accelerate>=1.2.0" \
         safetensors \
         peft \
         fastapi \

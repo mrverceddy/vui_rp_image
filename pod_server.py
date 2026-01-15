@@ -389,17 +389,21 @@ def load_qwen_image_edit_plus():
 
 
 def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
-    """Load Qwen-Image-Edit-2511 with Multiple Angles LoRA for camera control."""
+    """Load Qwen-Image-Edit-2511 Plus with Multiple Angles LoRA for camera control.
+
+    Uses QwenImageEditPlusPipeline for proper reference conditioning.
+    The reference image is passed as conditioning (not init latent).
+    """
     if "qwen_image_edit_angles" not in _models:
         set_model_loading(True)
         try:
             # Clear other models to free VRAM (keep only one major model at a time)
             clear_vram()
-            print("Loading Qwen-Image-Edit-2511 with Multiple Angles LoRA...")
-            from diffusers import QwenImageEditPipeline
+            print("Loading Qwen-Image-Edit-2511 Plus with Multiple Angles LoRA...")
+            from diffusers import QwenImageEditPlusPipeline
 
             # IMPORTANT: Use bfloat16 - float16 causes black images!
-            pipe = QwenImageEditPipeline.from_pretrained(
+            pipe = QwenImageEditPlusPipeline.from_pretrained(
                 MODEL_DIR / "qwen-image-edit",
                 torch_dtype=torch.bfloat16,
             )
@@ -415,17 +419,23 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
             if lora_file.exists():
                 print(f"Loading Multiple Angles LoRA from {lora_file}...")
                 pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
-                # Set LoRA strength using set_adapters (adapter name is "default_0" for first loaded LoRA)
-                pipe.set_adapters(["default_0"], adapter_weights=[lora_strength])
-                print(f"LoRA loaded with strength {lora_strength}")
+                print(f"LoRA loaded, will set strength at inference time")
+                _models["qwen_image_edit_angles_lora_loaded"] = True
             else:
                 print(f"Warning: LoRA file not found at {lora_file}, using base model")
+                _models["qwen_image_edit_angles_lora_loaded"] = False
 
             _models["qwen_image_edit_angles"] = pipe
-            _models["qwen_image_edit_angles_strength"] = lora_strength
         finally:
             set_model_loading(False)
-    return _models["qwen_image_edit_angles"]
+
+    # Always update LoRA strength before returning (may have changed)
+    pipe = _models["qwen_image_edit_angles"]
+    if _models.get("qwen_image_edit_angles_lora_loaded"):
+        pipe.set_adapters(["default_0"], adapter_weights=[lora_strength])
+        print(f"LoRA strength set to {lora_strength}")
+
+    return pipe
 
 
 def _run_image_generation(job_id: str, req: dict):
@@ -838,11 +848,12 @@ def _run_scene_angle(job_id: str, req: dict):
 
         lora_strength = req.get("lora_strength", 0.9)
         print(f"[{job_id}] Running pipeline with LoRA strength {lora_strength}...")
-        # LoRA strength is set at model load time via set_adapters()
+        # LoRA strength is set via set_adapters() in load function
+        # QwenImageEditPlusPipeline: image as list for reference conditioning
         image = pipe(
             prompt=prompt,
             negative_prompt=" ",  # Minimal negative prompt for this model
-            image=input_image,
+            image=[input_image],  # List for Plus pipeline reference conditioning
             height=req.get("height", 1024),
             width=req.get("width", 1024),
             num_inference_steps=total_steps,

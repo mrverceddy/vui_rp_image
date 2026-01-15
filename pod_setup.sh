@@ -21,13 +21,13 @@ echo "Installing PyTorch 2.5..."
 pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
 
 # Install diffusers stack with compatible versions
+# IMPORTANT: huggingface-hub must be <1.0 for transformers compatibility
 echo "Installing diffusers and transformers..."
-# Diffusers from git for QwenImagePipeline support
 pip install git+https://github.com/huggingface/diffusers.git
 pip install \
-    transformers>=4.51.3 \
-    huggingface_hub>=0.30.0 \
-    accelerate>=1.2.0 \
+    "transformers==4.51.3" \
+    "huggingface-hub==0.30.2" \
+    "accelerate>=1.2.0" \
     safetensors \
     peft
 
@@ -64,8 +64,12 @@ fi
 
 # IMPORTANT: Re-install core ML stack LAST to ensure compatibility
 # (other packages like kohya may install older/incompatible versions)
-echo "Re-installing latest ML stack (diffusers, transformers, accelerate)..."
-pip install --upgrade transformers huggingface-hub accelerate
+# huggingface-hub MUST be <1.0 for transformers compatibility!
+echo "Re-installing ML stack with pinned versions..."
+pip install --force-reinstall \
+    "transformers==4.51.3" \
+    "huggingface-hub==0.30.2" \
+    "accelerate>=1.2.0"
 pip install --force-reinstall git+https://github.com/huggingface/diffusers.git
 
 echo "=== Downloading Models ==="
