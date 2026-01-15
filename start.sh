@@ -15,10 +15,10 @@ if ! python -c "import diffusers" 2>/dev/null; then
     # PyTorch 2.5 with CUDA 12.1
     pip install -q torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
 
-    # Core deps - IMPORTANT: huggingface-hub must be <1.0!
+    # Core deps - use git versions for Qwen2.5-VL compatibility
     pip install -q \
         git+https://github.com/huggingface/diffusers.git \
-        "transformers==4.51.3" \
+        git+https://github.com/huggingface/transformers.git \
         "huggingface-hub==0.30.2" \
         "accelerate>=1.2.0" \
         safetensors \
