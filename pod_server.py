@@ -363,6 +363,25 @@ def load_qwen_image_edit():
     return _models["qwen_image_edit"]
 
 
+def _patch_qwen_vl_config(model_path):
+    """Patch Qwen2.5-VL config to fix dict vs PretrainedConfig bug.
+
+    See: https://github.com/huggingface/transformers/issues/36281
+    The text_config and vision_config are dicts but need to be PretrainedConfig objects.
+    """
+    from transformers import AutoConfig, PretrainedConfig
+
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+
+    # Convert dict configs to PretrainedConfig objects
+    if hasattr(config, 'text_config') and isinstance(config.text_config, dict):
+        config.text_config = PretrainedConfig.from_dict(config.text_config)
+    if hasattr(config, 'vision_config') and isinstance(config.vision_config, dict):
+        config.vision_config = PretrainedConfig.from_dict(config.vision_config)
+
+    return config
+
+
 def load_qwen_image_edit_plus():
     """Load Qwen-Image-Edit-2511 Plus for reference conditioning (WWAA method).
 
@@ -376,9 +395,17 @@ def load_qwen_image_edit_plus():
             clear_vram()
             print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
             from diffusers import QwenImageEditPlusPipeline
+
+            model_path = MODEL_DIR / "qwen-image-edit"
+
+            # Patch config to fix Qwen2.5-VL dict bug
+            print("Patching Qwen2.5-VL config...")
+            config = _patch_qwen_vl_config(model_path)
+
             # Try bfloat16 for Plus pipeline - float16 may cause black images
             pipe = QwenImageEditPlusPipeline.from_pretrained(
-                MODEL_DIR / "qwen-image-edit",
+                model_path,
+                config=config,
                 torch_dtype=torch.bfloat16,
             )
             pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
@@ -402,9 +429,16 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
             print("Loading Qwen-Image-Edit-2511 Plus with Multiple Angles LoRA...")
             from diffusers import QwenImageEditPlusPipeline
 
+            model_path = MODEL_DIR / "qwen-image-edit"
+
+            # Patch config to fix Qwen2.5-VL dict bug
+            print("Patching Qwen2.5-VL config...")
+            config = _patch_qwen_vl_config(model_path)
+
             # IMPORTANT: Use bfloat16 - float16 causes black images!
             pipe = QwenImageEditPlusPipeline.from_pretrained(
-                MODEL_DIR / "qwen-image-edit",
+                model_path,
+                config=config,
                 torch_dtype=torch.bfloat16,
             )
 
