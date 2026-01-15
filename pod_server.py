@@ -363,23 +363,34 @@ def load_qwen_image_edit():
     return _models["qwen_image_edit"]
 
 
-def _patch_qwen_vl_config(model_path):
-    """Patch Qwen2.5-VL config to fix dict vs PretrainedConfig bug.
+def _patch_transformers_generation_config():
+    """Monkey-patch transformers to fix Qwen2.5-VL dict config bug.
 
     See: https://github.com/huggingface/transformers/issues/36281
-    The text_config and vision_config are dicts but need to be PretrainedConfig objects.
+    The bug is in GenerationConfig.from_model_config() which assumes
+    decoder_config is a PretrainedConfig but it can be a dict.
     """
-    from transformers import AutoConfig, PretrainedConfig
+    from transformers.generation import configuration_utils
+    from transformers import PretrainedConfig
 
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    original_from_model_config = configuration_utils.GenerationConfig.from_model_config
 
-    # Convert dict configs to PretrainedConfig objects
-    if hasattr(config, 'text_config') and isinstance(config.text_config, dict):
-        config.text_config = PretrainedConfig.from_dict(config.text_config)
-    if hasattr(config, 'vision_config') and isinstance(config.vision_config, dict):
-        config.vision_config = PretrainedConfig.from_dict(config.vision_config)
+    @classmethod
+    def patched_from_model_config(cls, model_config, **kwargs):
+        # Fix: convert dict decoder_config to PretrainedConfig
+        if hasattr(model_config, 'text_config'):
+            if isinstance(model_config.text_config, dict):
+                model_config.text_config = PretrainedConfig.from_dict(model_config.text_config)
+        if hasattr(model_config, 'decoder') and isinstance(model_config.decoder, dict):
+            model_config.decoder = PretrainedConfig.from_dict(model_config.decoder)
+        return original_from_model_config.__func__(cls, model_config, **kwargs)
 
-    return config
+    configuration_utils.GenerationConfig.from_model_config = patched_from_model_config
+    print("Patched transformers GenerationConfig.from_model_config()")
+
+
+# Apply patch on module load
+_patch_transformers_generation_config()
 
 
 def load_qwen_image_edit_plus():
@@ -387,6 +398,8 @@ def load_qwen_image_edit_plus():
 
     This pipeline uses reference image as CONDITIONING, not init image.
     Generates new images from scratch that maintain character consistency.
+
+    Note: Uses monkey-patched GenerationConfig to fix Qwen2.5-VL dict bug.
     """
     if "qwen_image_edit_plus" not in _models:
         set_model_loading(True)
@@ -396,16 +409,9 @@ def load_qwen_image_edit_plus():
             print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
             from diffusers import QwenImageEditPlusPipeline
 
-            model_path = MODEL_DIR / "qwen-image-edit"
-
-            # Patch config to fix Qwen2.5-VL dict bug
-            print("Patching Qwen2.5-VL config...")
-            config = _patch_qwen_vl_config(model_path)
-
             # Try bfloat16 for Plus pipeline - float16 may cause black images
             pipe = QwenImageEditPlusPipeline.from_pretrained(
-                model_path,
-                config=config,
+                MODEL_DIR / "qwen-image-edit",
                 torch_dtype=torch.bfloat16,
             )
             pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
@@ -420,6 +426,8 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
 
     Uses QwenImageEditPlusPipeline for proper reference conditioning.
     The reference image is passed as conditioning (not init latent).
+
+    Note: Uses monkey-patched GenerationConfig to fix Qwen2.5-VL dict bug.
     """
     if "qwen_image_edit_angles" not in _models:
         set_model_loading(True)
@@ -429,16 +437,9 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
             print("Loading Qwen-Image-Edit-2511 Plus with Multiple Angles LoRA...")
             from diffusers import QwenImageEditPlusPipeline
 
-            model_path = MODEL_DIR / "qwen-image-edit"
-
-            # Patch config to fix Qwen2.5-VL dict bug
-            print("Patching Qwen2.5-VL config...")
-            config = _patch_qwen_vl_config(model_path)
-
             # IMPORTANT: Use bfloat16 - float16 causes black images!
             pipe = QwenImageEditPlusPipeline.from_pretrained(
-                model_path,
-                config=config,
+                MODEL_DIR / "qwen-image-edit",
                 torch_dtype=torch.bfloat16,
             )
 
