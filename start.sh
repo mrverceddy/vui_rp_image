@@ -19,7 +19,7 @@ if ! python -c "import diffusers" 2>/dev/null; then
     pip install -q \
         git+https://github.com/huggingface/diffusers.git \
         git+https://github.com/huggingface/transformers.git \
-        "huggingface-hub>=0.32.0,<1.0" \
+        "huggingface-hub>=1.3.0" \
         "accelerate>=1.2.0" \
         safetensors \
         peft \

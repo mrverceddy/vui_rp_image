@@ -21,12 +21,12 @@ echo "Installing PyTorch 2.5..."
 pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
 
 # Install diffusers stack with compatible versions
-# huggingface-hub must be >=0.32 (for is_offline_mode) but <1.0 (for transformers)
+# transformers from git requires huggingface-hub>=1.3.0
 echo "Installing diffusers and transformers..."
 pip install git+https://github.com/huggingface/diffusers.git
 pip install git+https://github.com/huggingface/transformers.git
 pip install \
-    "huggingface-hub>=0.32.0,<1.0" \
+    "huggingface-hub>=1.3.0" \
     "accelerate>=1.2.0" \
     safetensors \
     peft
@@ -67,7 +67,7 @@ fi
 echo "Re-installing ML stack with compatible versions..."
 pip install --force-reinstall git+https://github.com/huggingface/transformers.git
 pip install --force-reinstall git+https://github.com/huggingface/diffusers.git
-pip install "huggingface-hub>=0.32.0,<1.0" "accelerate>=1.2.0"
+pip install "huggingface-hub>=1.3.0" "accelerate>=1.2.0"
 
 echo "=== Downloading Models ==="
 
