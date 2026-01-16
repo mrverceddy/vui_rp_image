@@ -1378,6 +1378,17 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
 
         # Run DiffSynth training
         # See: https://github.com/modelscope/DiffSynth-Studio/blob/main/examples/qwen_image/model_training/lora/Qwen-Image-2512.sh
+        # Use local model paths (downloaded by pod_setup.sh to /workspace/models/)
+        local_model_dir = Path("/workspace/models/qwen-image")
+
+        # DiffSynth expects model_id:file_pattern format
+        # For local models, use the full path
+        model_paths = (
+            f"{local_model_dir}:transformer/diffusion_pytorch_model*.safetensors,"
+            f"{local_model_dir}:text_encoder/model*.safetensors,"
+            f"{local_model_dir}:vae/diffusion_pytorch_model.safetensors"
+        )
+
         cmd = [
             "accelerate", "launch",
             str(diffsynth_path / "examples" / "qwen_image" / "model_training" / "train.py"),
@@ -1385,7 +1396,7 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
             "--dataset_metadata_path", str(metadata_path),
             "--max_pixels", str(req.resolution * req.resolution),
             "--dataset_repeat", "50",
-            "--model_id_with_origin_paths", "Qwen/Qwen-Image-2512:transformer/diffusion_pytorch_model*.safetensors,Qwen/Qwen-Image:text_encoder/model*.safetensors,Qwen/Qwen-Image:vae/diffusion_pytorch_model.safetensors",
+            "--model_id_with_origin_paths", model_paths,
             "--learning_rate", str(req.learning_rate),
             "--num_epochs", str(req.num_epochs),
             "--remove_prefix_in_ckpt", "pipe.dit.",
