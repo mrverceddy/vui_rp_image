@@ -1214,7 +1214,7 @@ async def train_lora(req: TrainLoRARequest):
         # Create metadata CSV for DiffSynth
         metadata_path = images_dir / "metadata.csv"
         with open(metadata_path, "w") as f:
-            f.write("file_name,text\n")
+            f.write("file_name,prompt\n")
             for img_path in images_dir.glob("**/*.png"):
                 caption_path = img_path.with_suffix(".txt")
                 if caption_path.exists():
@@ -1364,7 +1364,7 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
         # Create metadata CSV for DiffSynth
         metadata_path = images_dir / "metadata.csv"
         with open(metadata_path, "w") as f:
-            f.write("file_name,text\n")
+            f.write("file_name,prompt\n")
             for img_path in images_dir.glob("*.png"):
                 caption_path = img_path.with_suffix(".txt")
                 if caption_path.exists():
@@ -1378,25 +1378,31 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
 
         # Run DiffSynth training
         # See: https://github.com/modelscope/DiffSynth-Studio/blob/main/examples/qwen_image/model_training/lora/Qwen-Image-2512.sh
-        # Use local model paths (downloaded by pod_setup.sh to /workspace/models/)
-        local_model_dir = Path("/workspace/models/qwen-image")
+        # Use symlink path format that DiffSynth expects (setup by pod_setup.sh)
+        # DIFFSYNTH_MODEL_BASE_PATH must be set for local model loading
+        import os
+        os.environ["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
 
-        # DiffSynth expects model_id:file_pattern format
-        # For local models, use the full path
+        # Model path format: model_id:file_pattern (relative to DIFFSYNTH_MODEL_BASE_PATH)
         model_paths = (
-            f"{local_model_dir}:transformer/diffusion_pytorch_model*.safetensors,"
-            f"{local_model_dir}:text_encoder/model*.safetensors,"
-            f"{local_model_dir}:vae/diffusion_pytorch_model.safetensors"
+            "Qwen/Qwen-Image-2512:transformer/diffusion_pytorch_model*.safetensors,"
+            "Qwen/Qwen-Image-2512:text_encoder/model*.safetensors,"
+            "Qwen/Qwen-Image-2512:vae/diffusion_pytorch_model.safetensors"
         )
 
+        # Tokenizer and processor paths (setup by pod_setup.sh copies files to root)
+        model_root = "/workspace/models/Qwen/Qwen-Image-2512"
+
         cmd = [
-            "accelerate", "launch",
+            "python",  # Use python directly, accelerate launch has issues in subprocess
             str(diffsynth_path / "examples" / "qwen_image" / "model_training" / "train.py"),
             "--dataset_base_path", str(images_dir),
             "--dataset_metadata_path", str(metadata_path),
             "--max_pixels", str(req.resolution * req.resolution),
             "--dataset_repeat", "50",
             "--model_id_with_origin_paths", model_paths,
+            "--tokenizer_path", model_root,
+            "--processor_path", model_root,
             "--learning_rate", str(req.learning_rate),
             "--num_epochs", str(req.num_epochs),
             "--remove_prefix_in_ckpt", "pipe.dit.",
@@ -1409,7 +1415,11 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
             "--find_unused_parameters",
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+        # Set environment for subprocess too
+        env = os.environ.copy()
+        env["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=env)
 
         # DiffSynth saves to output_path directory with epoch suffix
         lora_path = output_dir / req.lora_name / f"epoch_{req.num_epochs}.safetensors"
