@@ -84,9 +84,11 @@ fi
 
 # IMPORTANT: Re-install core ML stack LAST to ensure compatibility
 # (other packages like kohya may install older/incompatible versions)
+# peft requires transformers>=4.44.0 for HybridCache import
 echo "Re-installing ML stack with compatible versions..."
 pip install --force-reinstall git+https://github.com/huggingface/transformers.git
 pip install --force-reinstall git+https://github.com/huggingface/diffusers.git
+pip install --force-reinstall "peft>=0.13.0"
 pip install "huggingface-hub>=1.3.0" "accelerate>=1.2.0"
 
 # CRITICAL: Remove bitsandbytes if installed - causes triton.ops import error
