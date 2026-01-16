@@ -32,6 +32,7 @@ pip install \
     peft
 
 # Install other dependencies
+# NOTE: bitsandbytes removed - causes triton.ops conflict and we don't need 8-bit quantization
 pip install \
     fastapi \
     uvicorn \
@@ -43,7 +44,6 @@ pip install \
     omegaconf \
     einops \
     toml \
-    bitsandbytes \
     aiofiles \
     python-multipart
 
@@ -82,6 +82,11 @@ echo "Re-installing ML stack with compatible versions..."
 pip install --force-reinstall git+https://github.com/huggingface/transformers.git
 pip install --force-reinstall git+https://github.com/huggingface/diffusers.git
 pip install "huggingface-hub>=1.3.0" "accelerate>=1.2.0"
+
+# CRITICAL: Remove bitsandbytes if installed - causes triton.ops import error
+# bitsandbytes tries to import triton.ops which doesn't exist in newer triton versions
+echo "Removing bitsandbytes (causes triton compatibility issues)..."
+pip uninstall bitsandbytes -y 2>/dev/null || true
 
 echo "=== Downloading Models ==="
 
