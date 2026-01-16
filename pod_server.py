@@ -1135,42 +1135,84 @@ async def synthesize_voice(req: SynthesizeVoiceRequest):
 
 @app.post("/train_lora")
 async def train_lora(req: TrainLoRARequest):
+    """Train Qwen-Image LoRA from a zip URL containing images and captions.
+
+    The zip should contain images (png/jpg) with matching .txt caption files.
+    Uses DiffSynth-Studio or PEFT for Qwen-Image-2512 training.
+    """
     import zipfile
+    import shutil
     from urllib.request import urlretrieve
 
     clear_vram()
 
     dataset_dir = Path("/tmp/dataset")
+    images_dir = dataset_dir / "images"
     output_dir = Path("/workspace/loras")
-    dataset_dir.mkdir(exist_ok=True)
+
+    # Clean and recreate
+    if dataset_dir.exists():
+        shutil.rmtree(dataset_dir)
+    images_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(exist_ok=True)
 
+    # Download and extract dataset
     zip_path = dataset_dir / "dataset.zip"
     urlretrieve(req.dataset_url, zip_path)
 
     with zipfile.ZipFile(zip_path) as z:
-        z.extractall(dataset_dir / "images")
+        z.extractall(images_dir)
 
-    cmd = [
-        "accelerate", "launch",
-        "/workspace/sd-scripts/sdxl_train_network.py",
-        "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-xl-base-1.0",
-        "--train_data_dir", str(dataset_dir / "images"),
-        "--output_dir", str(output_dir),
-        "--output_name", req.lora_name,
-        "--max_train_epochs", str(req.num_epochs),
-        "--learning_rate", str(req.learning_rate),
-        "--network_dim", str(req.network_rank),
-        "--network_alpha", str(req.network_alpha),
-        "--resolution", f"{req.resolution},{req.resolution}",
-        "--mixed_precision", "bf16",
-        "--network_module", "networks.lora",
-        "--cache_latents",
-    ]
+    # Count images
+    image_count = len(list(images_dir.glob("**/*.png"))) + len(list(images_dir.glob("**/*.jpg")))
+    if image_count < 5:
+        raise HTTPException(400, f"Need at least 5 images, got {image_count}")
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    print(f"Training Qwen-Image LoRA '{req.lora_name}' with {image_count} images...")
 
-    lora_path = output_dir / f"{req.lora_name}.safetensors"
+    # Check if DiffSynth-Studio is available
+    diffsynth_path = Path("/workspace/DiffSynth-Studio")
+    if diffsynth_path.exists():
+        cmd = [
+            "accelerate", "launch",
+            str(diffsynth_path / "examples" / "train" / "train_lora.py"),
+            "--task", "qwen_image_2512",
+            "--pretrained_path", "/workspace/models/qwen-image",
+            "--dataset_path", str(images_dir),
+            "--output_path", str(output_dir / req.lora_name),
+            "--max_epochs", str(req.num_epochs),
+            "--learning_rate", str(req.learning_rate),
+            "--lora_rank", str(req.network_rank),
+            "--lora_alpha", str(req.network_alpha),
+            "--height", str(req.resolution),
+            "--width", str(req.resolution),
+            "--use_gradient_checkpointing",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+        lora_path = output_dir / req.lora_name / "lora.safetensors"
+        if not lora_path.exists():
+            lora_path = output_dir / f"{req.lora_name}.safetensors"
+    else:
+        # Fallback to Kohya SDXL (legacy, not recommended for Qwen-Image)
+        print("WARNING: DiffSynth not available, falling back to Kohya SDXL training")
+        cmd = [
+            "accelerate", "launch",
+            "/workspace/sd-scripts/sdxl_train_network.py",
+            "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-xl-base-1.0",
+            "--train_data_dir", str(images_dir),
+            "--output_dir", str(output_dir),
+            "--output_name", req.lora_name,
+            "--max_train_epochs", str(req.num_epochs),
+            "--learning_rate", str(req.learning_rate),
+            "--network_dim", str(req.network_rank),
+            "--network_alpha", str(req.network_alpha),
+            "--resolution", f"{req.resolution},{req.resolution}",
+            "--mixed_precision", "bf16",
+            "--network_module", "networks.lora",
+            "--cache_latents",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+        lora_path = output_dir / f"{req.lora_name}.safetensors"
 
     if not lora_path.exists():
         raise HTTPException(500, f"Training failed: {result.stderr[-500:]}")
@@ -1179,6 +1221,7 @@ async def train_lora(req: TrainLoRARequest):
         "path": str(lora_path),
         "size_mb": lora_path.stat().st_size / (1024*1024),
         "log": result.stdout[-1000:],
+        "images_trained": image_count,
     }
 
 
@@ -1196,12 +1239,17 @@ class TrainLoRABase64Request(BaseModel):
 
 @app.post("/train_lora_from_base64")
 async def train_lora_from_base64(req: TrainLoRABase64Request):
-    """Train LoRA from base64 encoded images with captions.
+    """Train Qwen-Image LoRA from base64 encoded images with captions.
 
     Accepts images directly as base64 (no URL/zip needed).
     Each item in dataset should have: image_base64, caption, filename
+
+    Uses PEFT to train LoRA on the Qwen-Image-2512 DiT transformer.
+    Target modules: attention (to_q, to_k, to_v) and MLP layers.
     """
     import shutil
+    from PIL import Image
+    import numpy as np
 
     clear_vram()
 
@@ -1242,35 +1290,190 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
     if image_count < 5:
         raise HTTPException(400, f"Need at least 5 images, got {image_count}")
 
-    print(f"Training LoRA '{req.lora_name}' with {image_count} images...")
+    print(f"Training Qwen-Image LoRA '{req.lora_name}' with {image_count} images...")
 
-    # Run training
-    cmd = [
-        "accelerate", "launch",
-        "/workspace/sd-scripts/sdxl_train_network.py",
-        "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-xl-base-1.0",
-        "--train_data_dir", str(images_dir),
-        "--output_dir", str(output_dir),
-        "--output_name", req.lora_name,
-        "--max_train_epochs", str(req.num_epochs),
-        "--learning_rate", str(req.learning_rate),
-        "--network_dim", str(req.network_rank),
-        "--network_alpha", str(req.network_alpha),
-        "--resolution", f"{req.resolution},{req.resolution}",
-        "--mixed_precision", "bf16",
-        "--network_module", "networks.lora",
-        "--cache_latents",
-        "--train_batch_size", "1",
-        "--gradient_accumulation_steps", "4",
-        "--save_every_n_epochs", "5",
-    ]
+    # Check if DiffSynth-Studio is available (preferred for Qwen-Image training)
+    diffsynth_path = Path("/workspace/DiffSynth-Studio")
+    if diffsynth_path.exists():
+        # Use DiffSynth-Studio for training
+        print("Using DiffSynth-Studio for Qwen-Image LoRA training...")
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+        # Create metadata CSV for DiffSynth
+        metadata_path = images_dir / "metadata.csv"
+        with open(metadata_path, "w") as f:
+            f.write("file_name,text\n")
+            for img_path in images_dir.glob("*.png"):
+                caption_path = img_path.with_suffix(".txt")
+                if caption_path.exists():
+                    caption = caption_path.read_text().strip().replace('"', '""')
+                    f.write(f'"{img_path.name}","{caption}"\n')
+            for img_path in images_dir.glob("*.jpg"):
+                caption_path = img_path.with_suffix(".txt")
+                if caption_path.exists():
+                    caption = caption_path.read_text().strip().replace('"', '""')
+                    f.write(f'"{img_path.name}","{caption}"\n')
 
-    lora_path = output_dir / f"{req.lora_name}.safetensors"
+        # Run DiffSynth training
+        cmd = [
+            "accelerate", "launch",
+            str(diffsynth_path / "examples" / "train" / "train_lora.py"),
+            "--task", "qwen_image_2512",
+            "--pretrained_path", "/workspace/models/qwen-image",
+            "--dataset_path", str(images_dir),
+            "--output_path", str(output_dir / req.lora_name),
+            "--max_epochs", str(req.num_epochs),
+            "--learning_rate", str(req.learning_rate),
+            "--lora_rank", str(req.network_rank),
+            "--lora_alpha", str(req.network_alpha),
+            "--height", str(req.resolution),
+            "--width", str(req.resolution),
+            "--use_gradient_checkpointing",
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+
+        # DiffSynth saves to output_path directory
+        lora_path = output_dir / req.lora_name / "lora.safetensors"
+        if not lora_path.exists():
+            # Try alternate location
+            lora_path = output_dir / f"{req.lora_name}.safetensors"
+
+    else:
+        # Fallback: Use direct PEFT training
+        print("Using PEFT for Qwen-Image LoRA training (DiffSynth not available)...")
+
+        try:
+            from diffusers import QwenImagePipeline
+            from peft import LoraConfig, get_peft_model
+            from safetensors.torch import save_file
+
+            device = "cuda"
+            dtype = torch.bfloat16
+
+            # Load model
+            print("Loading Qwen-Image-2512...")
+            pipe = QwenImagePipeline.from_pretrained(
+                "/workspace/models/qwen-image",
+                torch_dtype=dtype,
+            )
+
+            # Get transformer and apply LoRA
+            transformer = pipe.transformer.to(device)
+            transformer.train()
+
+            # Qwen-Image DiT target modules
+            target_modules = [
+                "to_q", "to_k", "to_v",
+                "add_q_proj", "add_k_proj", "add_v_proj",
+                "to_out.0", "to_add_out",
+            ]
+
+            lora_config = LoraConfig(
+                r=req.network_rank,
+                lora_alpha=req.network_alpha,
+                target_modules=target_modules,
+                lora_dropout=0.05,
+                bias="none",
+            )
+
+            transformer = get_peft_model(transformer, lora_config)
+            transformer.print_trainable_parameters()
+
+            # Freeze other components
+            pipe.vae.requires_grad_(False)
+            pipe.text_encoder.requires_grad_(False)
+            pipe.vae.to(device)
+            pipe.text_encoder.to(device)
+
+            # Simple training loop
+            optimizer = torch.optim.AdamW(
+                transformer.parameters(),
+                lr=req.learning_rate,
+            )
+
+            # Load images
+            print("Loading dataset...")
+            samples = []
+            for img_path in images_dir.glob("*.png"):
+                caption_path = img_path.with_suffix(".txt")
+                if caption_path.exists():
+                    samples.append((img_path, caption_path.read_text().strip()))
+            for img_path in images_dir.glob("*.jpg"):
+                caption_path = img_path.with_suffix(".txt")
+                if caption_path.exists():
+                    samples.append((img_path, caption_path.read_text().strip()))
+
+            print(f"Training on {len(samples)} samples for {req.num_epochs} epochs...")
+
+            for epoch in range(req.num_epochs):
+                epoch_loss = 0
+                for img_path, caption in samples:
+                    # Load and preprocess image
+                    img = Image.open(img_path).convert("RGB")
+                    img = img.resize((req.resolution, req.resolution))
+                    img_array = np.array(img).astype(np.float32) / 127.5 - 1.0
+                    img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0)
+                    img_tensor = img_tensor.to(device, dtype=dtype)
+
+                    # Encode with VAE
+                    with torch.no_grad():
+                        latents = pipe.vae.encode(img_tensor).latent_dist.sample()
+                        latents = latents * pipe.vae.config.scaling_factor
+
+                        # Encode text
+                        text_inputs = pipe.tokenizer(
+                            caption,
+                            padding="max_length",
+                            max_length=77,
+                            truncation=True,
+                            return_tensors="pt",
+                        ).to(device)
+                        text_embeds = pipe.text_encoder(**text_inputs).last_hidden_state
+
+                    # Sample noise and timestep
+                    noise = torch.randn_like(latents)
+                    timesteps = torch.randint(0, 1000, (1,), device=device).long()
+
+                    # Add noise
+                    noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
+
+                    # Predict noise
+                    noise_pred = transformer(
+                        noisy_latents,
+                        timestep=timesteps,
+                        encoder_hidden_states=text_embeds,
+                    ).sample
+
+                    # Loss
+                    loss = torch.nn.functional.mse_loss(noise_pred, noise)
+                    loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+                    epoch_loss += loss.item()
+
+                print(f"Epoch {epoch+1}/{req.num_epochs}, Loss: {epoch_loss/len(samples):.4f}")
+
+            # Save LoRA weights
+            lora_state_dict = {
+                k: v for k, v in transformer.state_dict().items()
+                if "lora" in k.lower()
+            }
+            lora_path = output_dir / f"{req.lora_name}.safetensors"
+            save_file(lora_state_dict, lora_path)
+
+            # Cleanup
+            del transformer, pipe
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            result = type('obj', (object,), {'stdout': f"PEFT training complete. {len(samples)} images, {req.num_epochs} epochs", 'stderr': ''})()
+
+        except Exception as e:
+            raise HTTPException(500, f"PEFT training failed: {str(e)}")
 
     if not lora_path.exists():
-        raise HTTPException(500, f"Training failed: {result.stderr[-1000:]}")
+        raise HTTPException(500, f"Training failed - no LoRA file created. Log: {result.stderr[-1000:] if hasattr(result, 'stderr') else 'unknown error'}")
 
     # Read LoRA and encode as base64
     lora_data = lora_path.read_bytes()
@@ -1280,7 +1483,7 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
         "lora_base64": lora_b64,
         "lora_path": str(lora_path),
         "lora_size_mb": len(lora_data) / (1024 * 1024),
-        "training_log": result.stdout[-2000:],
+        "training_log": result.stdout[-2000:] if hasattr(result, 'stdout') else "Training complete",
         "trigger_word": req.trigger_word,
         "images_trained": image_count,
     }

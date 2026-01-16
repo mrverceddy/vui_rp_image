@@ -56,10 +56,24 @@ pip install descript-audio-codec
 echo "Installing Fish Speech..."
 pip install fish-speech
 
-# Kohya sd-scripts for LoRA training
+# Kohya sd-scripts for SDXL LoRA training (legacy, kept for compatibility)
 if [ ! -d "/workspace/sd-scripts" ]; then
     git clone https://github.com/kohya-ss/sd-scripts.git /workspace/sd-scripts
     cd /workspace/sd-scripts && pip install -r requirements.txt
+fi
+
+# DiffSynth-Studio for Qwen-Image LoRA training (official)
+if [ ! -d "/workspace/DiffSynth-Studio" ]; then
+    echo "Installing DiffSynth-Studio for Qwen-Image LoRA training..."
+    git clone https://github.com/modelscope/DiffSynth-Studio.git /workspace/DiffSynth-Studio
+    cd /workspace/DiffSynth-Studio && pip install -e .
+fi
+
+# FlyMyAI LoRA trainer (alternative, simpler)
+if [ ! -d "/workspace/flymyai-lora-trainer" ]; then
+    echo "Installing FlyMyAI LoRA trainer..."
+    git clone https://github.com/FlyMyAI/flymyai-lora-trainer.git /workspace/flymyai-lora-trainer
+    cd /workspace/flymyai-lora-trainer && pip install -r requirements.txt
 fi
 
 # IMPORTANT: Re-install core ML stack LAST to ensure compatibility
