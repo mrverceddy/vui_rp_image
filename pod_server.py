@@ -426,17 +426,31 @@ def load_qwen_image_edit_plus():
             # Clear other models to free VRAM (keep only one major model at a time)
             print(f"[Model Cache] Loading qwen_image_edit_plus (current cache: {list(_models.keys())})")
             clear_vram(keep_model="qwen_image_edit_plus")
-            print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
+
+            model_path = MODEL_DIR / "qwen-image-edit"
+            print(f"Loading Qwen-Image-Edit-2511 Plus from {model_path}...")
+            print(f"  Model path exists: {model_path.exists()}")
+            if model_path.exists():
+                print(f"  Contents: {list(model_path.iterdir())[:5]}...")
+
             from diffusers import QwenImageEditPlusPipeline
 
             # Try bfloat16 for Plus pipeline - float16 may cause black images
+            print("[Model Cache] Calling from_pretrained (this takes 5-10 min)...")
             pipe = QwenImageEditPlusPipeline.from_pretrained(
-                MODEL_DIR / "qwen-image-edit",
+                model_path,
                 torch_dtype=torch.bfloat16,
             )
+            print("[Model Cache] from_pretrained complete, moving to CUDA...")
             pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
+            print("[Model Cache] Model on CUDA, caching...")
             _models["qwen_image_edit_plus"] = pipe
             print(f"[Model Cache] Successfully loaded qwen_image_edit_plus (cache keys: {list(_models.keys())})")
+        except Exception as e:
+            import traceback
+            print(f"[Model Cache] ERROR loading model: {e}")
+            print(traceback.format_exc())
+            raise  # Re-raise so warmup endpoint catches it
         finally:
             set_model_loading(False)
         return _models["qwen_image_edit_plus"]
