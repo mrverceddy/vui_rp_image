@@ -49,20 +49,32 @@ IDLE_OFFLOAD_DELAY = 120  # Seconds to wait before offloading after idle
 # Model loading state tracking
 _model_loading = False
 _model_loading_lock = threading.Lock()
+_model_ops_lock = threading.Lock()  # Lock for model loading/unloading operations
 
 # Request deduplication
 _pending_request_hashes = set()
 _request_hash_lock = threading.Lock()
 
 
-def clear_vram():
-    """Unload all models to free VRAM."""
+def clear_vram(keep_model: str = None):
+    """Unload models to free VRAM.
+
+    Args:
+        keep_model: If provided, keep this model loaded (don't clear it).
+    """
     global _models
+    cleared = []
     for name in list(_models.keys()):
+        if keep_model and name == keep_model:
+            continue
         del _models[name]
-    _models.clear()
+        cleared.append(name)
+    if not keep_model:
+        _models.clear()
     gc.collect()
     torch.cuda.empty_cache()
+    if cleared:
+        print(f"[Model Cache] Cleared models: {cleared}, remaining: {list(_models.keys())}")
 
 
 def set_model_loading(loading: bool):
@@ -168,9 +180,11 @@ async def _delayed_offload():
     try:
         await asyncio.sleep(IDLE_OFFLOAD_DELAY)
         if not _active_clients and not _has_pending_jobs():
-            print(f"No active clients for {IDLE_OFFLOAD_DELAY}s - offloading models...")
-            clear_vram()
-            print("Models offloaded to free VRAM")
+            with _model_ops_lock:  # Prevent clearing while model is loading
+                if not _active_clients and not _has_pending_jobs():  # Double-check after lock
+                    print(f"No active clients for {IDLE_OFFLOAD_DELAY}s - offloading models...")
+                    clear_vram()
+                    print("Models offloaded to free VRAM")
     except asyncio.CancelledError:
         pass  # Offload was cancelled because new work arrived
     finally:
@@ -401,11 +415,17 @@ def load_qwen_image_edit_plus():
 
     Note: Uses monkey-patched GenerationConfig to fix Qwen2.5-VL dict bug.
     """
-    if "qwen_image_edit_plus" not in _models:
+    with _model_ops_lock:  # Prevent race conditions in model loading
+        # Double-check after acquiring lock
+        if "qwen_image_edit_plus" in _models:
+            print(f"[Model Cache] qwen_image_edit_plus already loaded (cache keys: {list(_models.keys())})")
+            return _models["qwen_image_edit_plus"]
+
         set_model_loading(True)
         try:
             # Clear other models to free VRAM (keep only one major model at a time)
-            clear_vram()
+            print(f"[Model Cache] Loading qwen_image_edit_plus (current cache: {list(_models.keys())})")
+            clear_vram(keep_model="qwen_image_edit_plus")
             print("Loading Qwen-Image-Edit-2511 Plus (reference conditioning)...")
             from diffusers import QwenImageEditPlusPipeline
 
@@ -416,9 +436,10 @@ def load_qwen_image_edit_plus():
             )
             pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
             _models["qwen_image_edit_plus"] = pipe
+            print(f"[Model Cache] Successfully loaded qwen_image_edit_plus (cache keys: {list(_models.keys())})")
         finally:
             set_model_loading(False)
-    return _models["qwen_image_edit_plus"]
+        return _models["qwen_image_edit_plus"]
 
 
 def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
@@ -429,40 +450,43 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
 
     Note: Uses monkey-patched GenerationConfig to fix Qwen2.5-VL dict bug.
     """
-    if "qwen_image_edit_angles" not in _models:
-        set_model_loading(True)
-        try:
-            # Clear other models to free VRAM (keep only one major model at a time)
-            clear_vram()
-            print("Loading Qwen-Image-Edit-2511 Plus with Multiple Angles LoRA...")
-            from diffusers import QwenImageEditPlusPipeline
+    with _model_ops_lock:  # Prevent race conditions in model loading
+        if "qwen_image_edit_angles" not in _models:
+            set_model_loading(True)
+            try:
+                # Clear other models to free VRAM (keep only one major model at a time)
+                print(f"[Model Cache] Loading qwen_image_edit_angles (current cache: {list(_models.keys())})")
+                clear_vram(keep_model="qwen_image_edit_angles")
+                print("Loading Qwen-Image-Edit-2511 Plus with Multiple Angles LoRA...")
+                from diffusers import QwenImageEditPlusPipeline
 
-            # IMPORTANT: Use bfloat16 - float16 causes black images!
-            pipe = QwenImageEditPlusPipeline.from_pretrained(
-                MODEL_DIR / "qwen-image-edit",
-                torch_dtype=torch.bfloat16,
-            )
+                # IMPORTANT: Use bfloat16 - float16 causes black images!
+                pipe = QwenImageEditPlusPipeline.from_pretrained(
+                    MODEL_DIR / "qwen-image-edit",
+                    torch_dtype=torch.bfloat16,
+                )
 
-            # Move to GPU FIRST before LoRA operations (much faster)
-            pipe.to("cuda")
-            print("Model loaded to GPU")
+                # Move to GPU FIRST before LoRA operations (much faster)
+                pipe.to("cuda")
+                print("Model loaded to GPU")
 
-            # Load the Multiple Angles LoRA
-            lora_path = MODEL_DIR / "loras" / "multiple-angles"
-            lora_file = lora_path / "qwen-image-edit-2511-multiple-angles-lora.safetensors"
+                # Load the Multiple Angles LoRA
+                lora_path = MODEL_DIR / "loras" / "multiple-angles"
+                lora_file = lora_path / "qwen-image-edit-2511-multiple-angles-lora.safetensors"
 
-            if lora_file.exists():
-                print(f"Loading Multiple Angles LoRA from {lora_file}...")
-                pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
-                print(f"LoRA loaded, will set strength at inference time")
-                _models["qwen_image_edit_angles_lora_loaded"] = True
-            else:
-                print(f"Warning: LoRA file not found at {lora_file}, using base model")
-                _models["qwen_image_edit_angles_lora_loaded"] = False
+                if lora_file.exists():
+                    print(f"Loading Multiple Angles LoRA from {lora_file}...")
+                    pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
+                    print(f"LoRA loaded, will set strength at inference time")
+                    _models["qwen_image_edit_angles_lora_loaded"] = True
+                else:
+                    print(f"Warning: LoRA file not found at {lora_file}, using base model")
+                    _models["qwen_image_edit_angles_lora_loaded"] = False
 
-            _models["qwen_image_edit_angles"] = pipe
-        finally:
-            set_model_loading(False)
+                _models["qwen_image_edit_angles"] = pipe
+                print(f"[Model Cache] Successfully loaded qwen_image_edit_angles (cache keys: {list(_models.keys())})")
+            finally:
+                set_model_loading(False)
 
     # Always update LoRA strength before returning (may have changed)
     pipe = _models["qwen_image_edit_angles"]
