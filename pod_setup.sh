@@ -64,10 +64,12 @@ fi
 
 # DiffSynth-Studio for Qwen-Image LoRA training (official)
 if [ ! -d "/workspace/DiffSynth-Studio" ]; then
-    echo "Installing DiffSynth-Studio for Qwen-Image LoRA training..."
+    echo "Cloning DiffSynth-Studio for Qwen-Image LoRA training..."
     git clone https://github.com/modelscope/DiffSynth-Studio.git /workspace/DiffSynth-Studio
-    cd /workspace/DiffSynth-Studio && pip install -e .
 fi
+# Always ensure DiffSynth is installed (in case clone succeeded but install failed)
+echo "Installing DiffSynth-Studio..."
+cd /workspace/DiffSynth-Studio && pip install -e .
 
 # FlyMyAI LoRA trainer (alternative, simpler)
 if [ ! -d "/workspace/flymyai-lora-trainer" ]; then
