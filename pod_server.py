@@ -1214,7 +1214,7 @@ async def train_lora(req: TrainLoRARequest):
         # Create metadata CSV for DiffSynth
         metadata_path = images_dir / "metadata.csv"
         with open(metadata_path, "w") as f:
-            f.write("file_name,prompt\n")
+            f.write("image,prompt\n")  # DiffSynth expects "image" column, not "file_name"
             for img_path in images_dir.glob("**/*.png"):
                 caption_path = img_path.with_suffix(".txt")
                 if caption_path.exists():
@@ -1364,7 +1364,7 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
         # Create metadata CSV for DiffSynth
         metadata_path = images_dir / "metadata.csv"
         with open(metadata_path, "w") as f:
-            f.write("file_name,prompt\n")
+            f.write("image,prompt\n")  # DiffSynth expects "image" column, not "file_name"
             for img_path in images_dir.glob("*.png"):
                 caption_path = img_path.with_suffix(".txt")
                 if caption_path.exists():
