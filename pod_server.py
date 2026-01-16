@@ -1173,25 +1173,50 @@ async def train_lora(req: TrainLoRARequest):
     # Check if DiffSynth-Studio is available
     diffsynth_path = Path("/workspace/DiffSynth-Studio")
     if diffsynth_path.exists():
+        # Create metadata CSV for DiffSynth
+        metadata_path = images_dir / "metadata.csv"
+        with open(metadata_path, "w") as f:
+            f.write("file_name,text\n")
+            for img_path in images_dir.glob("**/*.png"):
+                caption_path = img_path.with_suffix(".txt")
+                if caption_path.exists():
+                    caption = caption_path.read_text().strip().replace('"', '""')
+                    f.write(f'"{img_path.name}","{caption}"\n')
+            for img_path in images_dir.glob("**/*.jpg"):
+                caption_path = img_path.with_suffix(".txt")
+                if caption_path.exists():
+                    caption = caption_path.read_text().strip().replace('"', '""')
+                    f.write(f'"{img_path.name}","{caption}"\n')
+
         cmd = [
             "accelerate", "launch",
-            str(diffsynth_path / "examples" / "train" / "train_lora.py"),
-            "--task", "qwen_image_2512",
-            "--pretrained_path", "/workspace/models/qwen-image",
-            "--dataset_path", str(images_dir),
-            "--output_path", str(output_dir / req.lora_name),
-            "--max_epochs", str(req.num_epochs),
+            str(diffsynth_path / "examples" / "qwen_image" / "model_training" / "train.py"),
+            "--dataset_base_path", str(images_dir),
+            "--dataset_metadata_path", str(metadata_path),
+            "--max_pixels", str(req.resolution * req.resolution),
+            "--dataset_repeat", "50",
+            "--model_id_with_origin_paths", "Qwen/Qwen-Image-2512:transformer/diffusion_pytorch_model*.safetensors,Qwen/Qwen-Image:text_encoder/model*.safetensors,Qwen/Qwen-Image:vae/diffusion_pytorch_model.safetensors",
             "--learning_rate", str(req.learning_rate),
+            "--num_epochs", str(req.num_epochs),
+            "--remove_prefix_in_ckpt", "pipe.dit.",
+            "--output_path", str(output_dir / req.lora_name),
+            "--lora_base_model", "dit",
+            "--lora_target_modules", "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1",
             "--lora_rank", str(req.network_rank),
-            "--lora_alpha", str(req.network_alpha),
-            "--height", str(req.resolution),
-            "--width", str(req.resolution),
             "--use_gradient_checkpointing",
+            "--dataset_num_workers", "4",
+            "--find_unused_parameters",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
-        lora_path = output_dir / req.lora_name / "lora.safetensors"
+
+        # DiffSynth saves to output_path directory with epoch suffix
+        lora_path = output_dir / req.lora_name / f"epoch_{req.num_epochs}.safetensors"
         if not lora_path.exists():
-            lora_path = output_dir / f"{req.lora_name}.safetensors"
+            for pattern in [output_dir / req.lora_name / "*.safetensors"]:
+                matches = list(pattern.parent.glob(pattern.name))
+                if matches:
+                    lora_path = matches[-1]
+                    break
     else:
         # Fallback to Kohya SDXL (legacy, not recommended for Qwen-Image)
         print("WARNING: DiffSynth not available, falling back to Kohya SDXL training")
@@ -1314,29 +1339,41 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
                     f.write(f'"{img_path.name}","{caption}"\n')
 
         # Run DiffSynth training
+        # See: https://github.com/modelscope/DiffSynth-Studio/blob/main/examples/qwen_image/model_training/lora/Qwen-Image-2512.sh
         cmd = [
             "accelerate", "launch",
-            str(diffsynth_path / "examples" / "train" / "train_lora.py"),
-            "--task", "qwen_image_2512",
-            "--pretrained_path", "/workspace/models/qwen-image",
-            "--dataset_path", str(images_dir),
-            "--output_path", str(output_dir / req.lora_name),
-            "--max_epochs", str(req.num_epochs),
+            str(diffsynth_path / "examples" / "qwen_image" / "model_training" / "train.py"),
+            "--dataset_base_path", str(images_dir),
+            "--dataset_metadata_path", str(metadata_path),
+            "--max_pixels", str(req.resolution * req.resolution),
+            "--dataset_repeat", "50",
+            "--model_id_with_origin_paths", "Qwen/Qwen-Image-2512:transformer/diffusion_pytorch_model*.safetensors,Qwen/Qwen-Image:text_encoder/model*.safetensors,Qwen/Qwen-Image:vae/diffusion_pytorch_model.safetensors",
             "--learning_rate", str(req.learning_rate),
+            "--num_epochs", str(req.num_epochs),
+            "--remove_prefix_in_ckpt", "pipe.dit.",
+            "--output_path", str(output_dir / req.lora_name),
+            "--lora_base_model", "dit",
+            "--lora_target_modules", "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1",
             "--lora_rank", str(req.network_rank),
-            "--lora_alpha", str(req.network_alpha),
-            "--height", str(req.resolution),
-            "--width", str(req.resolution),
             "--use_gradient_checkpointing",
+            "--dataset_num_workers", "4",
+            "--find_unused_parameters",
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
 
-        # DiffSynth saves to output_path directory
-        lora_path = output_dir / req.lora_name / "lora.safetensors"
+        # DiffSynth saves to output_path directory with epoch suffix
+        lora_path = output_dir / req.lora_name / f"epoch_{req.num_epochs}.safetensors"
         if not lora_path.exists():
-            # Try alternate location
-            lora_path = output_dir / f"{req.lora_name}.safetensors"
+            # Try other possible locations
+            for pattern in [
+                output_dir / req.lora_name / "*.safetensors",
+                output_dir / f"{req.lora_name}.safetensors",
+            ]:
+                matches = list(Path("/").glob(str(pattern).lstrip("/")))
+                if matches:
+                    lora_path = matches[-1]  # Get latest
+                    break
 
     else:
         # Fallback: Use direct PEFT training
