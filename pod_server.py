@@ -1595,6 +1595,57 @@ async def clear():
     return {"status": "cleared"}
 
 
+@app.post("/warmup")
+async def warmup_model(model: str = "qwen_image_edit_plus"):
+    """Preload a model into GPU memory.
+
+    Call this before batch operations to ensure model is ready.
+    Blocks until model is fully loaded.
+
+    Args:
+        model: Which model to load. Options:
+            - "qwen_image_edit_plus" (default) - for character variations
+            - "qwen_image_edit_angles" - for scene angles
+    """
+    if model == "qwen_image_edit_plus":
+        if "qwen_image_edit_plus" in _models:
+            return {
+                "status": "already_loaded",
+                "model": model,
+                "cache": list(_models.keys()),
+            }
+        # Load synchronously (blocking)
+        print(f"[Warmup] Loading {model}...")
+        try:
+            load_qwen_image_edit_plus()
+            return {
+                "status": "loaded",
+                "model": model,
+                "cache": list(_models.keys()),
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+    elif model == "qwen_image_edit_angles":
+        if "qwen_image_edit_angles" in _models:
+            return {
+                "status": "already_loaded",
+                "model": model,
+                "cache": list(_models.keys()),
+            }
+        print(f"[Warmup] Loading {model}...")
+        try:
+            load_qwen_image_edit_with_angles_lora()
+            return {
+                "status": "loaded",
+                "model": model,
+                "cache": list(_models.keys()),
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+    else:
+        return {"status": "error", "error": f"Unknown model: {model}"}
+
+
 @app.get("/download/{filename}")
 async def download(filename: str):
     path = OUTPUT_DIR / filename
