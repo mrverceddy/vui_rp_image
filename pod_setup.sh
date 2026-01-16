@@ -11,7 +11,9 @@ MODEL_DIR="/workspace/models"
 mkdir -p $MODEL_DIR
 
 # Install system dependencies
-apt-get update && apt-get install -y ffmpeg libsndfile1 git-lfs aria2 portaudio19-dev
+export DEBIAN_FRONTEND=noninteractive
+apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg libsndfile1 git-lfs aria2 portaudio19-dev libportaudio2
 
 # Upgrade pip
 pip install --upgrade pip
@@ -52,9 +54,11 @@ echo "Installing Parler-TTS..."
 pip install git+https://github.com/huggingface/parler-tts.git --no-deps
 pip install descript-audio-codec
 
-# Fish Speech
+# Fish Speech (requires pyaudio which needs portaudio headers)
 echo "Installing Fish Speech..."
-pip install fish-speech
+# Install pyaudio first (needs portaudio19-dev from apt-get above)
+pip install pyaudio || echo "Warning: pyaudio install failed, continuing..."
+pip install fish-speech || pip install fish-speech --no-deps
 
 # Kohya sd-scripts for SDXL LoRA training (legacy, kept for compatibility)
 if [ ! -d "/workspace/sd-scripts" ]; then
