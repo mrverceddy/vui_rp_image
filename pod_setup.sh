@@ -131,6 +131,41 @@ snapshot_download(
 )
 
 print("=== All models downloaded! ===")
+
+# Fix Qwen-Image for DiffSynth-Studio LoRA training
+print("Setting up Qwen-Image for DiffSynth LoRA training...")
+
+import os
+import shutil
+from pathlib import Path
+from huggingface_hub import hf_hub_download
+
+qwen_image_dir = Path("/workspace/models/qwen-image")
+
+# 1. Create symlink for DiffSynth model path format (expects Qwen/Qwen-Image-2512)
+symlink_dir = Path("/workspace/models/Qwen")
+symlink_dir.mkdir(exist_ok=True)
+symlink_path = symlink_dir / "Qwen-Image-2512"
+if symlink_path.exists() or symlink_path.is_symlink():
+    symlink_path.unlink()
+symlink_path.symlink_to(qwen_image_dir)
+print(f"  Created symlink: {symlink_path} -> {qwen_image_dir}")
+
+# 2. Download preprocessor_config.json (needed for Qwen2VLProcessor)
+print("  Downloading preprocessor_config.json...")
+hf_hub_download('Qwen/Qwen2-VL-7B-Instruct', 'preprocessor_config.json', local_dir=str(qwen_image_dir))
+
+# 3. Copy tokenizer files to root (processor needs them alongside preprocessor_config.json)
+tokenizer_dir = qwen_image_dir / "tokenizer"
+if tokenizer_dir.exists():
+    print("  Copying tokenizer files to model root...")
+    for f in tokenizer_dir.iterdir():
+        dest = qwen_image_dir / f.name
+        if not dest.exists():
+            shutil.copy2(f, dest)
+            print(f"    Copied {f.name}")
+
+print("=== Qwen-Image setup complete! ===")
 EOF
 
 echo ""
