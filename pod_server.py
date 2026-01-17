@@ -1300,19 +1300,147 @@ class TrainLoRABase64Request(BaseModel):
     resolution: int = 1024
 
 
+def _run_lora_training_base64(job_id: str, req_dict: dict):
+    """Background worker for LoRA training from base64 images."""
+    import shutil
+    import os
+
+    try:
+        update_job(job_id, status="running", progress=5)
+        print(f"[{job_id}] Starting LoRA training: {req_dict['lora_name']}")
+
+        dataset_dir = Path("/tmp/dataset_b64")
+        images_dir = dataset_dir / "images"
+        output_dir = Path("/workspace/loras")
+
+        # Count images (already written by endpoint)
+        image_count = len(list(images_dir.glob("*.png"))) + len(list(images_dir.glob("*.jpg")))
+        print(f"[{job_id}] Training with {image_count} images...")
+        update_job(job_id, progress=10)
+
+        # Check if DiffSynth-Studio is available
+        diffsynth_path = Path("/workspace/DiffSynth-Studio")
+        if diffsynth_path.exists():
+            print(f"[{job_id}] Using DiffSynth-Studio for training...")
+
+            # Create metadata CSV
+            metadata_path = images_dir / "metadata.csv"
+            with open(metadata_path, "w") as f:
+                f.write("image,prompt\n")
+                for img_path in images_dir.glob("*.png"):
+                    caption_path = img_path.with_suffix(".txt")
+                    if caption_path.exists():
+                        caption = caption_path.read_text().strip().replace('"', '""')
+                        f.write(f'"{img_path.name}","{caption}"\n')
+                for img_path in images_dir.glob("*.jpg"):
+                    caption_path = img_path.with_suffix(".txt")
+                    if caption_path.exists():
+                        caption = caption_path.read_text().strip().replace('"', '""')
+                        f.write(f'"{img_path.name}","{caption}"\n')
+
+            update_job(job_id, progress=15)
+
+            os.environ["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
+            model_paths = (
+                "Qwen/Qwen-Image-2512:transformer/diffusion_pytorch_model*.safetensors,"
+                "Qwen/Qwen-Image-2512:text_encoder/model*.safetensors,"
+                "Qwen/Qwen-Image-2512:vae/diffusion_pytorch_model.safetensors"
+            )
+            model_root = "/workspace/models/Qwen/Qwen-Image-2512"
+
+            cmd = [
+                "python",
+                str(diffsynth_path / "examples" / "qwen_image" / "model_training" / "train.py"),
+                "--dataset_base_path", str(images_dir),
+                "--dataset_metadata_path", str(metadata_path),
+                "--max_pixels", str(req_dict['resolution'] * req_dict['resolution']),
+                "--dataset_repeat", "50",
+                "--model_id_with_origin_paths", model_paths,
+                "--tokenizer_path", model_root,
+                "--processor_path", model_root,
+                "--learning_rate", str(req_dict['learning_rate']),
+                "--num_epochs", str(req_dict['num_epochs']),
+                "--remove_prefix_in_ckpt", "pipe.dit.",
+                "--output_path", str(output_dir / req_dict['lora_name']),
+                "--lora_base_model", "dit",
+                "--lora_target_modules", "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1",
+                "--lora_rank", str(req_dict['network_rank']),
+                "--use_gradient_checkpointing",
+                "--dataset_num_workers", "4",
+                "--find_unused_parameters",
+            ]
+
+            env = os.environ.copy()
+            env["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
+
+            print(f"[{job_id}] Running DiffSynth training (this may take 30-60 min)...")
+            update_job(job_id, progress=20)
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=env)
+
+            print(f"[{job_id}] Training subprocess completed with return code: {result.returncode}")
+            if result.stdout:
+                print(f"[{job_id}] stdout (last 500 chars): {result.stdout[-500:]}")
+            if result.stderr:
+                print(f"[{job_id}] stderr (last 500 chars): {result.stderr[-500:]}")
+
+            update_job(job_id, progress=90)
+
+            # Find the LoRA file
+            lora_path = output_dir / req_dict['lora_name'] / f"epoch_{req_dict['num_epochs']}.safetensors"
+            if not lora_path.exists():
+                for pattern in [
+                    output_dir / req_dict['lora_name'] / "*.safetensors",
+                    output_dir / f"{req_dict['lora_name']}.safetensors",
+                ]:
+                    matches = list(Path("/").glob(str(pattern).lstrip("/")))
+                    if matches:
+                        lora_path = matches[-1]
+                        break
+
+            if lora_path.exists():
+                print(f"[{job_id}] LoRA saved to: {lora_path}")
+                lora_b64 = base64.b64encode(lora_path.read_bytes()).decode()
+                lora_size_mb = lora_path.stat().st_size / (1024 * 1024)
+
+                update_job(
+                    job_id,
+                    status="complete",
+                    progress=100,
+                    result={
+                        "lora_base64": lora_b64,
+                        "lora_path": str(lora_path),
+                        "lora_size_mb": lora_size_mb,
+                        "training_log": result.stdout[-2000:] if result.stdout else "",
+                    }
+                )
+                print(f"[{job_id}] Training complete! LoRA size: {lora_size_mb:.1f}MB")
+            else:
+                error_msg = f"LoRA file not found after training. stderr: {result.stderr[-1000:] if result.stderr else 'none'}"
+                print(f"[{job_id}] ERROR: {error_msg}")
+                update_job(job_id, status="failed", error=error_msg)
+        else:
+            update_job(job_id, status="failed", error="DiffSynth-Studio not found")
+
+    except subprocess.TimeoutExpired:
+        update_job(job_id, status="failed", error="Training timed out after 2 hours")
+    except Exception as e:
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"[{job_id}] ERROR: {error_msg}")
+        update_job(job_id, status="failed", error=error_msg)
+
+
 @app.post("/train_lora_from_base64")
 async def train_lora_from_base64(req: TrainLoRABase64Request):
     """Train Qwen-Image LoRA from base64 encoded images with captions.
 
+    Returns job_id immediately - poll /job/{job_id} for status.
+
     Accepts images directly as base64 (no URL/zip needed).
     Each item in dataset should have: image_base64, caption, filename
-
-    Uses PEFT to train LoRA on the Qwen-Image-2512 DiT transformer.
-    Target modules: attention (to_q, to_k, to_v) and MLP layers.
     """
     import shutil
-    from PIL import Image
-    import numpy as np
 
     clear_vram()
 
@@ -1328,7 +1456,7 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
     images_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(exist_ok=True)
 
-    # Write images and captions
+    # Write images and captions (do this synchronously - it's fast)
     for i, item in enumerate(req.dataset):
         img_b64 = item.get("image_base64", "")
         caption = item.get("caption", "")
@@ -1337,14 +1465,9 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
         if not img_b64:
             continue
 
-        # Get base name without extension
         base_name = Path(filename).stem
-
-        # Write image
         img_path = images_dir / filename
         img_path.write_bytes(base64.b64decode(img_b64))
-
-        # Write caption (same name but .txt)
         caption_path = images_dir / f"{base_name}.txt"
         caption_path.write_text(caption)
 
@@ -1353,236 +1476,13 @@ async def train_lora_from_base64(req: TrainLoRABase64Request):
     if image_count < 5:
         raise HTTPException(400, f"Need at least 5 images, got {image_count}")
 
-    print(f"Training Qwen-Image LoRA '{req.lora_name}' with {image_count} images...")
+    print(f"Received {image_count} images for LoRA '{req.lora_name}', starting background training...")
 
-    # Check if DiffSynth-Studio is available (preferred for Qwen-Image training)
-    diffsynth_path = Path("/workspace/DiffSynth-Studio")
-    if diffsynth_path.exists():
-        # Use DiffSynth-Studio for training
-        print("Using DiffSynth-Studio for Qwen-Image LoRA training...")
+    # Create job and submit to background executor
+    job_id = create_job()
+    _executor.submit(_run_lora_training_base64, job_id, req.model_dump())
 
-        # Create metadata CSV for DiffSynth
-        metadata_path = images_dir / "metadata.csv"
-        with open(metadata_path, "w") as f:
-            f.write("image,prompt\n")  # DiffSynth expects "image" column, not "file_name"
-            for img_path in images_dir.glob("*.png"):
-                caption_path = img_path.with_suffix(".txt")
-                if caption_path.exists():
-                    caption = caption_path.read_text().strip().replace('"', '""')
-                    f.write(f'"{img_path.name}","{caption}"\n')
-            for img_path in images_dir.glob("*.jpg"):
-                caption_path = img_path.with_suffix(".txt")
-                if caption_path.exists():
-                    caption = caption_path.read_text().strip().replace('"', '""')
-                    f.write(f'"{img_path.name}","{caption}"\n')
-
-        # Run DiffSynth training
-        # See: https://github.com/modelscope/DiffSynth-Studio/blob/main/examples/qwen_image/model_training/lora/Qwen-Image-2512.sh
-        # Use symlink path format that DiffSynth expects (setup by pod_setup.sh)
-        # DIFFSYNTH_MODEL_BASE_PATH must be set for local model loading
-        import os
-        os.environ["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
-
-        # Model path format: model_id:file_pattern (relative to DIFFSYNTH_MODEL_BASE_PATH)
-        model_paths = (
-            "Qwen/Qwen-Image-2512:transformer/diffusion_pytorch_model*.safetensors,"
-            "Qwen/Qwen-Image-2512:text_encoder/model*.safetensors,"
-            "Qwen/Qwen-Image-2512:vae/diffusion_pytorch_model.safetensors"
-        )
-
-        # Tokenizer and processor paths (setup by pod_setup.sh copies files to root)
-        model_root = "/workspace/models/Qwen/Qwen-Image-2512"
-
-        cmd = [
-            "python",  # Use python directly, accelerate launch has issues in subprocess
-            str(diffsynth_path / "examples" / "qwen_image" / "model_training" / "train.py"),
-            "--dataset_base_path", str(images_dir),
-            "--dataset_metadata_path", str(metadata_path),
-            "--max_pixels", str(req.resolution * req.resolution),
-            "--dataset_repeat", "50",
-            "--model_id_with_origin_paths", model_paths,
-            "--tokenizer_path", model_root,
-            "--processor_path", model_root,
-            "--learning_rate", str(req.learning_rate),
-            "--num_epochs", str(req.num_epochs),
-            "--remove_prefix_in_ckpt", "pipe.dit.",
-            "--output_path", str(output_dir / req.lora_name),
-            "--lora_base_model", "dit",
-            "--lora_target_modules", "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1",
-            "--lora_rank", str(req.network_rank),
-            "--use_gradient_checkpointing",
-            "--dataset_num_workers", "4",
-            "--find_unused_parameters",
-        ]
-
-        # Set environment for subprocess too
-        env = os.environ.copy()
-        env["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=env)
-
-        # DiffSynth saves to output_path directory with epoch suffix
-        lora_path = output_dir / req.lora_name / f"epoch_{req.num_epochs}.safetensors"
-        if not lora_path.exists():
-            # Try other possible locations
-            for pattern in [
-                output_dir / req.lora_name / "*.safetensors",
-                output_dir / f"{req.lora_name}.safetensors",
-            ]:
-                matches = list(Path("/").glob(str(pattern).lstrip("/")))
-                if matches:
-                    lora_path = matches[-1]  # Get latest
-                    break
-
-    else:
-        # Fallback: Use direct PEFT training
-        print("Using PEFT for Qwen-Image LoRA training (DiffSynth not available)...")
-
-        try:
-            from diffusers import QwenImagePipeline
-            from peft import LoraConfig, get_peft_model
-            from safetensors.torch import save_file
-
-            device = "cuda"
-            dtype = torch.bfloat16
-
-            # Load model
-            print("Loading Qwen-Image-2512...")
-            pipe = QwenImagePipeline.from_pretrained(
-                "/workspace/models/qwen-image",
-                torch_dtype=dtype,
-            )
-
-            # Get transformer and apply LoRA
-            transformer = pipe.transformer.to(device)
-            transformer.train()
-
-            # Qwen-Image DiT target modules
-            target_modules = [
-                "to_q", "to_k", "to_v",
-                "add_q_proj", "add_k_proj", "add_v_proj",
-                "to_out.0", "to_add_out",
-            ]
-
-            lora_config = LoraConfig(
-                r=req.network_rank,
-                lora_alpha=req.network_alpha,
-                target_modules=target_modules,
-                lora_dropout=0.05,
-                bias="none",
-            )
-
-            transformer = get_peft_model(transformer, lora_config)
-            transformer.print_trainable_parameters()
-
-            # Freeze other components
-            pipe.vae.requires_grad_(False)
-            pipe.text_encoder.requires_grad_(False)
-            pipe.vae.to(device)
-            pipe.text_encoder.to(device)
-
-            # Simple training loop
-            optimizer = torch.optim.AdamW(
-                transformer.parameters(),
-                lr=req.learning_rate,
-            )
-
-            # Load images
-            print("Loading dataset...")
-            samples = []
-            for img_path in images_dir.glob("*.png"):
-                caption_path = img_path.with_suffix(".txt")
-                if caption_path.exists():
-                    samples.append((img_path, caption_path.read_text().strip()))
-            for img_path in images_dir.glob("*.jpg"):
-                caption_path = img_path.with_suffix(".txt")
-                if caption_path.exists():
-                    samples.append((img_path, caption_path.read_text().strip()))
-
-            print(f"Training on {len(samples)} samples for {req.num_epochs} epochs...")
-
-            for epoch in range(req.num_epochs):
-                epoch_loss = 0
-                for img_path, caption in samples:
-                    # Load and preprocess image
-                    img = Image.open(img_path).convert("RGB")
-                    img = img.resize((req.resolution, req.resolution))
-                    img_array = np.array(img).astype(np.float32) / 127.5 - 1.0
-                    img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0)
-                    img_tensor = img_tensor.to(device, dtype=dtype)
-
-                    # Encode with VAE
-                    with torch.no_grad():
-                        latents = pipe.vae.encode(img_tensor).latent_dist.sample()
-                        latents = latents * pipe.vae.config.scaling_factor
-
-                        # Encode text
-                        text_inputs = pipe.tokenizer(
-                            caption,
-                            padding="max_length",
-                            max_length=77,
-                            truncation=True,
-                            return_tensors="pt",
-                        ).to(device)
-                        text_embeds = pipe.text_encoder(**text_inputs).last_hidden_state
-
-                    # Sample noise and timestep
-                    noise = torch.randn_like(latents)
-                    timesteps = torch.randint(0, 1000, (1,), device=device).long()
-
-                    # Add noise
-                    noisy_latents = pipe.scheduler.add_noise(latents, noise, timesteps)
-
-                    # Predict noise
-                    noise_pred = transformer(
-                        noisy_latents,
-                        timestep=timesteps,
-                        encoder_hidden_states=text_embeds,
-                    ).sample
-
-                    # Loss
-                    loss = torch.nn.functional.mse_loss(noise_pred, noise)
-                    loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
-
-                    epoch_loss += loss.item()
-
-                print(f"Epoch {epoch+1}/{req.num_epochs}, Loss: {epoch_loss/len(samples):.4f}")
-
-            # Save LoRA weights
-            lora_state_dict = {
-                k: v for k, v in transformer.state_dict().items()
-                if "lora" in k.lower()
-            }
-            lora_path = output_dir / f"{req.lora_name}.safetensors"
-            save_file(lora_state_dict, lora_path)
-
-            # Cleanup
-            del transformer, pipe
-            gc.collect()
-            torch.cuda.empty_cache()
-
-            result = type('obj', (object,), {'stdout': f"PEFT training complete. {len(samples)} images, {req.num_epochs} epochs", 'stderr': ''})()
-
-        except Exception as e:
-            raise HTTPException(500, f"PEFT training failed: {str(e)}")
-
-    if not lora_path.exists():
-        raise HTTPException(500, f"Training failed - no LoRA file created. Log: {result.stderr[-1000:] if hasattr(result, 'stderr') else 'unknown error'}")
-
-    # Read LoRA and encode as base64
-    lora_data = lora_path.read_bytes()
-    lora_b64 = base64.b64encode(lora_data).decode()
-
-    return {
-        "lora_base64": lora_b64,
-        "lora_path": str(lora_path),
-        "lora_size_mb": len(lora_data) / (1024 * 1024),
-        "training_log": result.stdout[-2000:] if hasattr(result, 'stdout') else "Training complete",
-        "trigger_word": req.trigger_word,
-        "images_trained": image_count,
-    }
+    return {"job_id": job_id, "status": "pending", "image_count": image_count}
 
 
 # =============================================================================
