@@ -82,14 +82,25 @@ if [ ! -d "/workspace/flymyai-lora-trainer" ]; then
     cd /workspace/flymyai-lora-trainer && pip install -r requirements.txt
 fi
 
-# IMPORTANT: Re-install core ML stack LAST to ensure compatibility
-# (other packages like kohya may install older/incompatible versions)
-# peft requires transformers>=4.44.0 for HybridCache import
-# torch/torchvision must match versions (2.5.0/0.20.0) or torchvision::nms errors occur
-# huggingface-hub>=1.3.0 requires transformers>=4.48.0 for compatibility
-echo "Re-installing ML stack with compatible versions..."
-pip install --force-reinstall torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
-pip install --force-reinstall "huggingface-hub>=1.3.0" "accelerate>=1.2.0"
+# IMPORTANT: Fix torch/torchvision version mismatch
+# RunPod base images may have system torch pre-installed - we need matching torchvision
+echo "Detecting torch version and installing matching torchvision..."
+TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null || echo "none")
+echo "Detected torch version: $TORCH_VERSION"
+
+if [[ "$TORCH_VERSION" == "2.9"* ]]; then
+    echo "Using system torch 2.9.x, installing matching torchvision 0.24.x..."
+    pip install --force-reinstall torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128
+elif [[ "$TORCH_VERSION" == "2.5"* ]]; then
+    echo "Using torch 2.5.x, installing matching torchvision 0.20.x..."
+    pip install --force-reinstall torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
+else
+    echo "Installing torch 2.5.0 stack (known working)..."
+    pip install --force-reinstall torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
+fi
+
+# Install other ML dependencies
+pip install --force-reinstall "huggingface-hub>=0.30.0" "accelerate>=1.2.0"
 pip install --force-reinstall "transformers>=4.48.0"
 pip install --force-reinstall git+https://github.com/huggingface/diffusers.git
 pip install --force-reinstall "peft>=0.13.0"
@@ -104,7 +115,7 @@ python3 -c "import torchvision; print(f'torchvision: {torchvision.__version__}')
 # Test torchvision actually works (catches version mismatch errors)
 echo "Testing torchvision import..."
 python3 -c "from torchvision import transforms; print('torchvision OK')" || {
-    echo "ERROR: torchvision broken, reinstalling..."
+    echo "ERROR: torchvision broken, attempting full reinstall..."
     pip uninstall torch torchvision torchaudio -y
     pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
     python3 -c "from torchvision import transforms; print('torchvision OK after reinstall')"
