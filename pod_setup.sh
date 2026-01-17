@@ -120,19 +120,24 @@ declare -A TORCHVISION_MAP=(
     ["2.2"]="0.17"
 )
 
+# CRITICAL: Uninstall existing torchvision first - system packages won't be replaced otherwise
+echo "Removing existing torchvision/torchaudio to ensure clean install..."
+pip uninstall torchvision torchaudio -y 2>/dev/null || true
+
 if [[ -n "${TORCHVISION_MAP[$TORCH_VERSION]}" ]]; then
     TV_VERSION="${TORCHVISION_MAP[$TORCH_VERSION]}"
     echo "Using system torch $TORCH_VERSION, installing matching torchvision $TV_VERSION..."
-    pip install --force-reinstall "torchvision>=${TV_VERSION},<${TV_VERSION%.*}.$((${TV_VERSION##*.}+1))" \
+    pip install "torchvision>=${TV_VERSION},<${TV_VERSION%.*}.$((${TV_VERSION##*.}+1))" \
         "torchaudio>=${TORCH_VERSION}.0,<${TORCH_VERSION%.*}.$((${TORCH_VERSION##*.}+1))" \
         --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}" || {
-        echo "Failed to install matching versions, trying exact versions..."
-        pip install --force-reinstall torchvision==${TV_VERSION}.0 torchaudio==${TORCH_VERSION}.0 \
+        echo "Failed with version range, trying exact versions..."
+        pip install torchvision==${TV_VERSION}.0 torchaudio==${TORCH_VERSION}.0 \
             --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
     }
 else
     echo "Unknown or no torch version, installing complete stack..."
-    pip install --force-reinstall torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 \
+    pip uninstall torch -y 2>/dev/null || true
+    pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 \
         --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
 fi
 
