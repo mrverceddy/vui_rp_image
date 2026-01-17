@@ -1,42 +1,24 @@
 #!/bin/bash
 # Quick start script for RunPod pod
-# Run after pod reboot to reinstall deps and start server
+# Activates venv and starts the server
 
 set -e
-echo "=== StoryGen Pod Quick Start ==="
+echo "=== StoryGen Pod Server ==="
 echo "Started at: $(date)"
 
-# Check if deps already installed
-if ! python -c "import diffusers" 2>/dev/null; then
-    echo "Installing dependencies..."
+VENV_DIR="/workspace/venv"
 
-    pip install -q --upgrade pip
-
-    # PyTorch 2.5 with CUDA 12.1
-    pip install -q torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
-
-    # Core deps - use git versions for Qwen2.5-VL compatibility
-    pip install -q \
-        git+https://github.com/huggingface/diffusers.git \
-        git+https://github.com/huggingface/transformers.git \
-        "huggingface-hub>=1.3.0" \
-        "accelerate>=1.2.0" \
-        safetensors \
-        peft \
-        fastapi \
-        uvicorn \
-        sentencepiece \
-        protobuf \
-        einops \
-        omegaconf
-
-    echo "Dependencies installed!"
-else
-    echo "Dependencies already installed, skipping..."
+# Check if venv exists
+if [ ! -d "$VENV_DIR" ]; then
+    echo "ERROR: Virtual environment not found at $VENV_DIR"
+    echo "Please run 'bash pod_setup.sh' first"
+    exit 1
 fi
 
-# Create output dir
-mkdir -p /workspace/outputs
+# Activate venv
+source "$VENV_DIR/bin/activate"
+echo "Using Python: $(which python)"
+echo "Torch version: $(python -c 'import torch; print(torch.__version__)')"
 
 # Check models
 if [ ! -d "/workspace/models/qwen-image" ]; then
@@ -45,6 +27,9 @@ if [ ! -d "/workspace/models/qwen-image" ]; then
     echo "Run 'bash pod_setup.sh' first to download models"
     echo ""
 fi
+
+# Create output dir
+mkdir -p /workspace/outputs
 
 # Start server
 echo ""

@@ -13,7 +13,18 @@ mkdir -p $MODEL_DIR
 # Install system dependencies
 export DEBIAN_FRONTEND=noninteractive
 apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg libsndfile1 git-lfs aria2 portaudio19-dev libportaudio2
+    ffmpeg libsndfile1 git-lfs aria2 portaudio19-dev libportaudio2 python3-venv
+
+# Create clean virtual environment to isolate from broken system packages
+VENV_DIR="/workspace/venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating clean virtual environment at $VENV_DIR..."
+    python3 -m venv "$VENV_DIR"
+fi
+
+# Activate venv for this script
+source "$VENV_DIR/bin/activate"
+echo "Using Python: $(which python3)"
 
 # Upgrade pip
 pip install --upgrade pip
@@ -82,96 +93,15 @@ if [ ! -d "/workspace/flymyai-lora-trainer" ]; then
     cd /workspace/flymyai-lora-trainer && pip install -r requirements.txt
 fi
 
-# IMPORTANT: Fix torch/torchvision version mismatch
-# RunPod base images have different torch/CUDA versions - detect and match
-echo "=== Detecting system configuration ==="
-
-# Detect CUDA version
-CUDA_VERSION=$(nvcc --version 2>/dev/null | grep "release" | sed -n 's/.*release \([0-9]*\.[0-9]*\).*/\1/p' || echo "")
-if [ -z "$CUDA_VERSION" ]; then
-    CUDA_VERSION=$(python3 -c "import torch; print('.'.join(torch.version.cuda.split('.')[:2]))" 2>/dev/null || echo "12.1")
-fi
-echo "Detected CUDA version: $CUDA_VERSION"
-
-# Map CUDA version to PyTorch index URL
-case "$CUDA_VERSION" in
-    12.8*) CUDA_INDEX="cu128" ;;
-    12.6*) CUDA_INDEX="cu126" ;;
-    12.4*) CUDA_INDEX="cu124" ;;
-    12.1*) CUDA_INDEX="cu121" ;;
-    11.8*) CUDA_INDEX="cu118" ;;
-    *) CUDA_INDEX="cu121" ;;  # Default fallback
-esac
-echo "Using PyTorch index: $CUDA_INDEX"
-
-# Detect existing torch version
-TORCH_VERSION=$(python3 -c "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))" 2>/dev/null || echo "none")
-echo "Detected torch version: $TORCH_VERSION"
-
-# Version compatibility matrix: torch -> torchvision, torchaudio
-declare -A TORCHVISION_MAP=(
-    ["2.9"]="0.24"
-    ["2.8"]="0.23"
-    ["2.7"]="0.22"
-    ["2.6"]="0.21"
-    ["2.5"]="0.20"
-    ["2.4"]="0.19"
-    ["2.3"]="0.18"
-    ["2.2"]="0.17"
-)
-
-# CRITICAL: Completely remove existing torchvision/torchaudio
-echo "Completely removing existing torchvision/torchaudio..."
-pip uninstall torchvision torchaudio -y 2>/dev/null || true
-
-# Force remove ALL possible locations (system, user, site-packages, dist-packages)
-for PYDIR in /usr/local/lib/python*/dist-packages /usr/local/lib/python*/site-packages \
-             /usr/lib/python*/dist-packages /usr/lib/python*/site-packages \
-             ~/.local/lib/python*/site-packages; do
-    rm -rf ${PYDIR}/torchvision* 2>/dev/null || true
-    rm -rf ${PYDIR}/torchaudio* 2>/dev/null || true
-done
-
-# Clear pip cache to avoid stale packages
-pip cache purge 2>/dev/null || true
-
-if [[ -n "${TORCHVISION_MAP[$TORCH_VERSION]}" ]]; then
-    TV_VERSION="${TORCHVISION_MAP[$TORCH_VERSION]}"
-    echo "Using system torch $TORCH_VERSION, installing matching torchvision $TV_VERSION..."
-    pip install --no-cache-dir "torchvision>=${TV_VERSION},<${TV_VERSION%.*}.$((${TV_VERSION##*.}+1))" \
-        "torchaudio>=${TORCH_VERSION}.0,<${TORCH_VERSION%.*}.$((${TORCH_VERSION##*.}+1))" \
-        --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}" || {
-        echo "Failed with version range, trying exact versions..."
-        pip install --no-cache-dir torchvision==${TV_VERSION}.0 torchaudio==${TORCH_VERSION}.0 \
-            --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
-    }
-else
-    echo "Unknown or no torch version, installing complete stack..."
-    pip uninstall torch -y 2>/dev/null || true
-    rm -rf /usr/local/lib/python*/dist-packages/torch* 2>/dev/null || true
-    pip install --no-cache-dir torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 \
-        --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
-fi
-
-# Verify torchvision actually works before continuing
-echo "Verifying torchvision installation..."
-python3 -c "from torchvision import transforms; print('torchvision import OK')" || {
-    echo "ERROR: torchvision still broken after install!"
-    echo "Attempting complete torch stack reinstall..."
-    pip uninstall torch torchvision torchaudio -y 2>/dev/null || true
-    for PYDIR in /usr/local/lib/python*/dist-packages /usr/local/lib/python*/site-packages; do
-        rm -rf ${PYDIR}/torch* 2>/dev/null || true
-    done
-    pip install --no-cache-dir torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 \
-        --index-url https://download.pytorch.org/whl/cu121
-    python3 -c "from torchvision import transforms; print('torchvision OK after full reinstall')"
-}
+# IMPORTANT: Install ML stack in clean venv (no system package conflicts)
+echo "=== Installing ML stack in venv ==="
+pip install --no-cache-dir torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
 
 # Install other ML dependencies
-pip install --force-reinstall "huggingface-hub>=0.30.0" "accelerate>=1.2.0"
-pip install --force-reinstall "transformers>=4.48.0"
-pip install --force-reinstall git+https://github.com/huggingface/diffusers.git
-pip install --force-reinstall "peft>=0.13.0"
+pip install --no-cache-dir "huggingface-hub>=0.30.0" "accelerate>=1.2.0"
+pip install --no-cache-dir "transformers>=4.48.0"
+pip install --no-cache-dir git+https://github.com/huggingface/diffusers.git
+pip install --no-cache-dir "peft>=0.13.0"
 
 # Verify versions are compatible
 echo "Verifying ML stack versions..."
@@ -275,7 +205,11 @@ EOF
 echo ""
 echo "=== Setup Complete ==="
 echo "Models are in: /workspace/models"
+echo "Virtual environment: /workspace/venv"
 echo ""
 echo "To start the server, run:"
-echo "  python /workspace/vui_rp_image/pod_server.py"
+echo "  source /workspace/venv/bin/activate && python /workspace/vui_rp_image/pod_server.py"
+echo ""
+echo "Or use the start script:"
+echo "  bash /workspace/vui_rp_image/start.sh"
 echo ""
