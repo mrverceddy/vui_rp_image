@@ -86,12 +86,19 @@ fi
 # (other packages like kohya may install older/incompatible versions)
 # peft requires transformers>=4.44.0 for HybridCache import
 # torch/torchvision must match versions (2.5.0/0.20.0) or torchvision::nms errors occur
+# huggingface-hub>=1.3.0 requires transformers>=4.48.0 for compatibility
 echo "Re-installing ML stack with compatible versions..."
 pip install --force-reinstall torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
-pip install --force-reinstall git+https://github.com/huggingface/transformers.git
+pip install --force-reinstall "huggingface-hub>=1.3.0" "accelerate>=1.2.0"
+pip install --force-reinstall "transformers>=4.48.0"
 pip install --force-reinstall git+https://github.com/huggingface/diffusers.git
 pip install --force-reinstall "peft>=0.13.0"
-pip install "huggingface-hub>=1.3.0" "accelerate>=1.2.0"
+
+# Verify versions are compatible
+echo "Verifying ML stack versions..."
+python3 -c "import transformers; print(f'transformers: {transformers.__version__}')"
+python3 -c "import huggingface_hub; print(f'huggingface_hub: {huggingface_hub.__version__}')"
+python3 -c "import torch; print(f'torch: {torch.__version__}')"
 
 # CRITICAL: Remove bitsandbytes if installed - causes triton.ops import error
 # bitsandbytes tries to import triton.ops which doesn't exist in newer triton versions
