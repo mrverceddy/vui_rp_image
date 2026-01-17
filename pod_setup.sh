@@ -120,9 +120,12 @@ declare -A TORCHVISION_MAP=(
     ["2.2"]="0.17"
 )
 
-# CRITICAL: Uninstall existing torchvision first - system packages won't be replaced otherwise
+# CRITICAL: Remove existing torchvision - system packages won't be replaced by pip
 echo "Removing existing torchvision/torchaudio to ensure clean install..."
 pip uninstall torchvision torchaudio -y 2>/dev/null || true
+# Force remove if pip didn't work (system-level installs)
+rm -rf /usr/local/lib/python*/dist-packages/torchvision* 2>/dev/null || true
+rm -rf /usr/local/lib/python*/dist-packages/torchaudio* 2>/dev/null || true
 
 if [[ -n "${TORCHVISION_MAP[$TORCH_VERSION]}" ]]; then
     TV_VERSION="${TORCHVISION_MAP[$TORCH_VERSION]}"
