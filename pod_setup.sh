@@ -120,29 +120,52 @@ declare -A TORCHVISION_MAP=(
     ["2.2"]="0.17"
 )
 
-# CRITICAL: Remove existing torchvision - system packages won't be replaced by pip
-echo "Removing existing torchvision/torchaudio to ensure clean install..."
+# CRITICAL: Completely remove existing torchvision/torchaudio
+echo "Completely removing existing torchvision/torchaudio..."
 pip uninstall torchvision torchaudio -y 2>/dev/null || true
-# Force remove if pip didn't work (system-level installs)
-rm -rf /usr/local/lib/python*/dist-packages/torchvision* 2>/dev/null || true
-rm -rf /usr/local/lib/python*/dist-packages/torchaudio* 2>/dev/null || true
+
+# Force remove ALL possible locations (system, user, site-packages, dist-packages)
+for PYDIR in /usr/local/lib/python*/dist-packages /usr/local/lib/python*/site-packages \
+             /usr/lib/python*/dist-packages /usr/lib/python*/site-packages \
+             ~/.local/lib/python*/site-packages; do
+    rm -rf ${PYDIR}/torchvision* 2>/dev/null || true
+    rm -rf ${PYDIR}/torchaudio* 2>/dev/null || true
+done
+
+# Clear pip cache to avoid stale packages
+pip cache purge 2>/dev/null || true
 
 if [[ -n "${TORCHVISION_MAP[$TORCH_VERSION]}" ]]; then
     TV_VERSION="${TORCHVISION_MAP[$TORCH_VERSION]}"
     echo "Using system torch $TORCH_VERSION, installing matching torchvision $TV_VERSION..."
-    pip install "torchvision>=${TV_VERSION},<${TV_VERSION%.*}.$((${TV_VERSION##*.}+1))" \
+    pip install --no-cache-dir "torchvision>=${TV_VERSION},<${TV_VERSION%.*}.$((${TV_VERSION##*.}+1))" \
         "torchaudio>=${TORCH_VERSION}.0,<${TORCH_VERSION%.*}.$((${TORCH_VERSION##*.}+1))" \
         --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}" || {
         echo "Failed with version range, trying exact versions..."
-        pip install torchvision==${TV_VERSION}.0 torchaudio==${TORCH_VERSION}.0 \
+        pip install --no-cache-dir torchvision==${TV_VERSION}.0 torchaudio==${TORCH_VERSION}.0 \
             --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
     }
 else
     echo "Unknown or no torch version, installing complete stack..."
     pip uninstall torch -y 2>/dev/null || true
-    pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 \
+    rm -rf /usr/local/lib/python*/dist-packages/torch* 2>/dev/null || true
+    pip install --no-cache-dir torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 \
         --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
 fi
+
+# Verify torchvision actually works before continuing
+echo "Verifying torchvision installation..."
+python3 -c "from torchvision import transforms; print('torchvision import OK')" || {
+    echo "ERROR: torchvision still broken after install!"
+    echo "Attempting complete torch stack reinstall..."
+    pip uninstall torch torchvision torchaudio -y 2>/dev/null || true
+    for PYDIR in /usr/local/lib/python*/dist-packages /usr/local/lib/python*/site-packages; do
+        rm -rf ${PYDIR}/torch* 2>/dev/null || true
+    done
+    pip install --no-cache-dir torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 \
+        --index-url https://download.pytorch.org/whl/cu121
+    python3 -c "from torchvision import transforms; print('torchvision OK after full reinstall')"
+}
 
 # Install other ML dependencies
 pip install --force-reinstall "huggingface-hub>=0.30.0" "accelerate>=1.2.0"
