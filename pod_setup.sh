@@ -99,6 +99,16 @@ echo "Verifying ML stack versions..."
 python3 -c "import transformers; print(f'transformers: {transformers.__version__}')"
 python3 -c "import huggingface_hub; print(f'huggingface_hub: {huggingface_hub.__version__}')"
 python3 -c "import torch; print(f'torch: {torch.__version__}')"
+python3 -c "import torchvision; print(f'torchvision: {torchvision.__version__}')"
+
+# Test torchvision actually works (catches version mismatch errors)
+echo "Testing torchvision import..."
+python3 -c "from torchvision import transforms; print('torchvision OK')" || {
+    echo "ERROR: torchvision broken, reinstalling..."
+    pip uninstall torch torchvision torchaudio -y
+    pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
+    python3 -c "from torchvision import transforms; print('torchvision OK after reinstall')"
+}
 
 # CRITICAL: Remove bitsandbytes if installed - causes triton.ops import error
 # bitsandbytes tries to import triton.ops which doesn't exist in newer triton versions
