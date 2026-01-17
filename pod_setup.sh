@@ -83,20 +83,57 @@ if [ ! -d "/workspace/flymyai-lora-trainer" ]; then
 fi
 
 # IMPORTANT: Fix torch/torchvision version mismatch
-# RunPod base images may have system torch pre-installed - we need matching torchvision
-echo "Detecting torch version and installing matching torchvision..."
-TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null || echo "none")
+# RunPod base images have different torch/CUDA versions - detect and match
+echo "=== Detecting system configuration ==="
+
+# Detect CUDA version
+CUDA_VERSION=$(nvcc --version 2>/dev/null | grep "release" | sed -n 's/.*release \([0-9]*\.[0-9]*\).*/\1/p' || echo "")
+if [ -z "$CUDA_VERSION" ]; then
+    CUDA_VERSION=$(python3 -c "import torch; print('.'.join(torch.version.cuda.split('.')[:2]))" 2>/dev/null || echo "12.1")
+fi
+echo "Detected CUDA version: $CUDA_VERSION"
+
+# Map CUDA version to PyTorch index URL
+case "$CUDA_VERSION" in
+    12.8*) CUDA_INDEX="cu128" ;;
+    12.6*) CUDA_INDEX="cu126" ;;
+    12.4*) CUDA_INDEX="cu124" ;;
+    12.1*) CUDA_INDEX="cu121" ;;
+    11.8*) CUDA_INDEX="cu118" ;;
+    *) CUDA_INDEX="cu121" ;;  # Default fallback
+esac
+echo "Using PyTorch index: $CUDA_INDEX"
+
+# Detect existing torch version
+TORCH_VERSION=$(python3 -c "import torch; v=torch.__version__.split('+')[0]; print('.'.join(v.split('.')[:2]))" 2>/dev/null || echo "none")
 echo "Detected torch version: $TORCH_VERSION"
 
-if [[ "$TORCH_VERSION" == "2.9"* ]]; then
-    echo "Using system torch 2.9.x, installing matching torchvision 0.24.x..."
-    pip install --force-reinstall torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128
-elif [[ "$TORCH_VERSION" == "2.5"* ]]; then
-    echo "Using torch 2.5.x, installing matching torchvision 0.20.x..."
-    pip install --force-reinstall torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
+# Version compatibility matrix: torch -> torchvision, torchaudio
+declare -A TORCHVISION_MAP=(
+    ["2.9"]="0.24"
+    ["2.8"]="0.23"
+    ["2.7"]="0.22"
+    ["2.6"]="0.21"
+    ["2.5"]="0.20"
+    ["2.4"]="0.19"
+    ["2.3"]="0.18"
+    ["2.2"]="0.17"
+)
+
+if [[ -n "${TORCHVISION_MAP[$TORCH_VERSION]}" ]]; then
+    TV_VERSION="${TORCHVISION_MAP[$TORCH_VERSION]}"
+    echo "Using system torch $TORCH_VERSION, installing matching torchvision $TV_VERSION..."
+    pip install --force-reinstall "torchvision>=${TV_VERSION},<${TV_VERSION%.*}.$((${TV_VERSION##*.}+1))" \
+        "torchaudio>=${TORCH_VERSION}.0,<${TORCH_VERSION%.*}.$((${TORCH_VERSION##*.}+1))" \
+        --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}" || {
+        echo "Failed to install matching versions, trying exact versions..."
+        pip install --force-reinstall torchvision==${TV_VERSION}.0 torchaudio==${TORCH_VERSION}.0 \
+            --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
+    }
 else
-    echo "Installing torch 2.5.0 stack (known working)..."
-    pip install --force-reinstall torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
+    echo "Unknown or no torch version, installing complete stack..."
+    pip install --force-reinstall torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 \
+        --index-url "https://download.pytorch.org/whl/${CUDA_INDEX}"
 fi
 
 # Install other ML dependencies
