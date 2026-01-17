@@ -243,6 +243,19 @@ async def get_job_status(job_id: str):
     return job
 
 
+@app.get("/jobs")
+async def list_jobs():
+    """List all jobs with their status."""
+    with _job_lock:
+        return {
+            "jobs": [
+                {"job_id": jid, **job}
+                for jid, job in sorted(_jobs.items(), key=lambda x: x[1]["created_at"], reverse=True)
+            ],
+            "total": len(_jobs),
+        }
+
+
 # =============================================================================
 # REQUEST/RESPONSE MODELS
 # =============================================================================
@@ -1376,15 +1389,106 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
             print(f"[{job_id}] Running DiffSynth training (this may take 30-60 min)...")
             update_job(job_id, progress=20)
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=env)
+            # Use Popen to stream output and parse progress
+            import re
+            import select
 
-            print(f"[{job_id}] Training subprocess completed with return code: {result.returncode}")
-            if result.stdout:
-                print(f"[{job_id}] stdout (last 500 chars): {result.stdout[-500:]}")
-            if result.stderr:
-                print(f"[{job_id}] stderr (last 500 chars): {result.stderr[-500:]}")
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                text=True,
+                bufsize=1,  # Line buffered
+                env=env,
+            )
+
+            stdout_lines = []
+            num_epochs = req_dict['num_epochs']
+            current_epoch = 0
+            current_step = 0
+            total_steps_per_epoch = None
+            last_reported_progress = 20
+
+            # Read output line by line
+            try:
+                for line in iter(process.stdout.readline, ''):
+                    if not line:
+                        break
+                    stdout_lines.append(line)
+
+                    # Parse progress from DiffSynth output
+                    # Look for patterns like "Epoch 1/10" or "epoch 1" or step counters
+                    epoch_match = re.search(r'[Ee]poch\s*[:\s]*(\d+)(?:/(\d+))?', line)
+                    step_match = re.search(r'[Ss]tep\s*[:\s]*(\d+)(?:/(\d+))?', line)
+                    # Also check for tqdm-style progress: "  5%|" or "100%|"
+                    tqdm_match = re.search(r'\s*(\d+)%\|', line)
+                    # Check for "X/Y" pattern common in progress bars
+                    fraction_match = re.search(r'(\d+)/(\d+)\s*\[', line)
+
+                    if epoch_match:
+                        current_epoch = int(epoch_match.group(1))
+                        if epoch_match.group(2):
+                            num_epochs = int(epoch_match.group(2))
+
+                    if step_match:
+                        current_step = int(step_match.group(1))
+                        if step_match.group(2):
+                            total_steps_per_epoch = int(step_match.group(2))
+
+                    if fraction_match:
+                        current_step = int(fraction_match.group(1))
+                        total_steps_per_epoch = int(fraction_match.group(2))
+
+                    # Calculate progress (20-90% range for training)
+                    if num_epochs > 0:
+                        if total_steps_per_epoch and total_steps_per_epoch > 0:
+                            # Fine-grained: epoch + step progress
+                            epoch_progress = (current_epoch - 1) / num_epochs if current_epoch > 0 else 0
+                            step_progress = current_step / total_steps_per_epoch / num_epochs
+                            training_progress = epoch_progress + step_progress
+                        else:
+                            # Coarse: just epoch progress
+                            training_progress = current_epoch / num_epochs
+
+                        # Map to 20-90% range
+                        progress = 20 + int(training_progress * 70)
+                        progress = min(90, max(20, progress))
+
+                        # Update if changed by at least 2%
+                        if progress >= last_reported_progress + 2:
+                            update_job(job_id, progress=progress)
+                            last_reported_progress = progress
+                            print(f"[{job_id}] Training progress: {progress}% (epoch {current_epoch}/{num_epochs})")
+
+                    # Also check tqdm percentage directly
+                    if tqdm_match:
+                        tqdm_pct = int(tqdm_match.group(1))
+                        progress = 20 + int(tqdm_pct * 0.70)  # Map 0-100% to 20-90%
+                        if progress >= last_reported_progress + 2:
+                            update_job(job_id, progress=progress)
+                            last_reported_progress = progress
+
+                process.wait(timeout=7200)
+                returncode = process.returncode
+                stdout_text = ''.join(stdout_lines)
+
+            except subprocess.TimeoutExpired:
+                process.kill()
+                raise
+
+            print(f"[{job_id}] Training subprocess completed with return code: {returncode}")
+            if stdout_text:
+                print(f"[{job_id}] stdout (last 500 chars): {stdout_text[-500:]}")
 
             update_job(job_id, progress=90)
+
+            # Store for result
+            class Result:
+                def __init__(self, rc, out):
+                    self.returncode = rc
+                    self.stdout = out
+                    self.stderr = ""
+            result = Result(returncode, stdout_text)
 
             # Find the LoRA file
             lora_path = output_dir / req_dict['lora_name'] / f"epoch_{req_dict['num_epochs']}.safetensors"
