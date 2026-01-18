@@ -99,7 +99,8 @@ pip install --no-cache-dir torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --
 
 # Install other ML dependencies
 pip install --no-cache-dir "huggingface-hub>=0.30.0" "accelerate>=1.2.0"
-pip install --no-cache-dir "transformers>=4.48.0"
+# transformers from git for DINOv3 support (required by DiffSynth-Studio)
+pip install --no-cache-dir git+https://github.com/huggingface/transformers.git
 pip install --no-cache-dir git+https://github.com/huggingface/diffusers.git
 pip install --no-cache-dir "peft>=0.13.0"
 
