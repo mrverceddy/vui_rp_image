@@ -150,12 +150,16 @@ def get_job(job_id: str) -> dict:
 
 
 def cleanup_old_jobs(max_age_seconds: int = 3600):
-    """Remove jobs older than max_age_seconds."""
+    """Remove completed/failed jobs older than max_age_seconds.
+
+    Only removes jobs that are done (complete/failed), never running/pending jobs.
+    """
     now = time.time()
     with _job_lock:
         to_remove = [
             jid for jid, job in _jobs.items()
             if now - job["created_at"] > max_age_seconds
+            and job["status"] in ("complete", "failed")  # Don't delete running jobs!
         ]
         for jid in to_remove:
             del _jobs[jid]
