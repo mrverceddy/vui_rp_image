@@ -1011,19 +1011,43 @@ async def generate_scene_angle(req: SceneAngleRequest):
 # =============================================================================
 
 def load_wan():
-    """Load Wan 2.1 FLF2V for video generation."""
+    """Load Wan 2.2 I2V for video generation (supports I2V and first-last-frame modes)."""
     if "wan" not in _models:
         set_model_loading(True)
         try:
-            # Don't clear VRAM - A100 80GB can hold multiple models
-            print("Loading Wan 2.1 FLF2V...")
-            from diffusers import WanFLFToVideoPipeline
-            pipe = WanFLFToVideoPipeline.from_pretrained(
-                MODEL_DIR / "wan-flf2v",
-                torch_dtype=torch.float16,
-            )
-            pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
+            print("Loading Wan 2.2 I2V (Image/First-Last-Frame to Video)...")
+            from diffusers import WanImageToVideoPipeline, WanTransformer3DModel
+
+            # Load with bf16 transformers for better quality
+            bf16_path = MODEL_DIR / "wan-i2v-bf16"
+            base_path = MODEL_DIR / "wan-i2v"
+
+            if bf16_path.exists():
+                print("  Using bf16 transformers for better quality...")
+                pipe = WanImageToVideoPipeline.from_pretrained(
+                    base_path,
+                    transformer=WanTransformer3DModel.from_pretrained(
+                        bf16_path,
+                        subfolder='transformer',
+                        torch_dtype=torch.bfloat16,
+                    ),
+                    transformer_2=WanTransformer3DModel.from_pretrained(
+                        bf16_path,
+                        subfolder='transformer_2',
+                        torch_dtype=torch.bfloat16,
+                    ),
+                    torch_dtype=torch.bfloat16,
+                )
+            else:
+                print("  Using standard fp16 model...")
+                pipe = WanImageToVideoPipeline.from_pretrained(
+                    base_path,
+                    torch_dtype=torch.float16,
+                )
+
+            pipe.to("cuda")
             _models["wan"] = pipe
+            print("Wan 2.2 I2V loaded successfully!")
         finally:
             set_model_loading(False)
     return _models["wan"]

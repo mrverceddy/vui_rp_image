@@ -41,8 +41,9 @@ pip install git+https://github.com/huggingface/transformers.git
 pip install \
     "huggingface-hub>=1.3.0" \
     "accelerate>=1.2.0" \
-    safetensors \
-    peft
+    safetensors
+# peft from git for compatibility with transformers from git
+pip install git+https://github.com/huggingface/peft.git
 
 # Install other dependencies
 # NOTE: bitsandbytes removed - causes triton.ops conflict and we don't need 8-bit quantization
@@ -102,7 +103,8 @@ pip install --no-cache-dir "huggingface-hub>=0.30.0" "accelerate>=1.2.0"
 # transformers from git for DINOv3 support (required by DiffSynth-Studio)
 pip install --no-cache-dir git+https://github.com/huggingface/transformers.git
 pip install --no-cache-dir git+https://github.com/huggingface/diffusers.git
-pip install --no-cache-dir "peft>=0.13.0"
+# peft from git for compatibility with transformers 5.0.0.dev0
+pip install --no-cache-dir git+https://github.com/huggingface/peft.git
 
 # Verify versions are compatible
 echo "Verifying ML stack versions..."
@@ -140,8 +142,14 @@ snapshot_download("Qwen/Qwen-Image-2512", local_dir="/workspace/models/qwen-imag
 print("Downloading Qwen-Image-Edit-2511 (img2img editing)...")
 snapshot_download("Qwen/Qwen-Image-Edit-2511", local_dir="/workspace/models/qwen-image-edit")
 
-print("Downloading Wan 2.2 I2V...")
-snapshot_download("Wan-AI/Wan2.2-I2V-A14B", local_dir="/workspace/models/wan-i2v")
+# Wan 2.2 I2V - Image to Video (supports BOTH single image AND first+last frame modes)
+# This is the model for video generation - can do I2V or FLF (first-last-frame) with same model
+# Using bf16 variant for better quality and LoRA training compatibility
+print("Downloading Wan 2.2 I2V (Image/First-Last-Frame to Video)...")
+snapshot_download("Wan-AI/Wan2.2-I2V-A14B-Diffusers", local_dir="/workspace/models/wan-i2v")
+# Also get the bf16 transformers for better quality
+print("Downloading Wan 2.2 I2V bf16 transformers...")
+snapshot_download("cbensimon/Wan2.2-I2V-A14B-bf16-Diffusers", local_dir="/workspace/models/wan-i2v-bf16")
 
 print("Downloading Parler-TTS...")
 snapshot_download("parler-tts/parler-tts-mini-v1", local_dir="/workspace/models/parler-tts")
