@@ -12,6 +12,7 @@ import base64
 import gc
 import io
 import os
+import random
 import subprocess
 import threading
 import time
@@ -540,7 +541,9 @@ def _run_image_generation(job_id: str, req: dict):
         update_job(job_id, progress=10)
 
         seed = req.get("seed", -1)
-        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+        actual_seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
+        generator = torch.Generator("cuda").manual_seed(actual_seed)
+        print(f"[{job_id}] Using seed: {actual_seed}")
 
         total_steps = req.get("num_steps", 28)
         print(f"[{job_id}] Prompt: {req['prompt'][:100]}...")
@@ -617,7 +620,9 @@ def _run_image_edit(job_id: str, req: dict):
         input_image = input_image.resize((req.get("width", 1024), req.get("height", 1024)))
 
         seed = req.get("seed", -1)
-        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+        actual_seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
+        generator = torch.Generator("cuda").manual_seed(actual_seed)
+        print(f"[{job_id}] Using seed: {actual_seed}")
 
         # Optimal settings for Qwen-Image-Edit-2511
         total_steps = req.get("num_steps", 40)  # Recommended: 40 steps
@@ -709,7 +714,9 @@ def _run_image_generation_v2(job_id: str, req: dict):
         ref_image = Image.fromarray(noise_array, mode="RGB")
 
         seed = req.get("seed", -1)
-        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+        actual_seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
+        generator = torch.Generator("cuda").manual_seed(actual_seed)
+        print(f"[{job_id}] Using seed: {actual_seed}")
 
         total_steps = req.get("num_steps", 30)
         print(f"[{job_id}] Prompt: {req['prompt'][:100]}...")
@@ -802,7 +809,9 @@ def _run_character_variation(job_id: str, req: dict):
         ref_image = ref_image.convert("RGB")
 
         seed = req.get("seed", -1)
-        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+        actual_seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
+        generator = torch.Generator("cuda").manual_seed(actual_seed)
+        print(f"[{job_id}] Using seed: {actual_seed}")
 
         total_steps = req.get("num_steps", 20)
 
@@ -912,7 +921,9 @@ def _run_scene_angle(job_id: str, req: dict):
         input_image = input_image.resize((req.get("width", 1024), req.get("height", 1024)))
 
         seed = req.get("seed", -1)
-        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+        actual_seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
+        generator = torch.Generator("cuda").manual_seed(actual_seed)
+        print(f"[{job_id}] Using seed: {actual_seed}")
 
         # Build prompt with <sks> trigger
         # Format: <sks> [azimuth] [elevation] [distance]
@@ -1074,7 +1085,9 @@ def _run_video_generation(job_id: str, req: dict):
             end_img = end_img.resize((req.get("width", 1280), req.get("height", 720)))
 
         seed = req.get("seed", -1)
-        generator = torch.Generator("cuda").manual_seed(seed) if seed >= 0 else None
+        actual_seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
+        generator = torch.Generator("cuda").manual_seed(actual_seed)
+        print(f"[{job_id}] Using seed: {actual_seed}")
 
         def progress_callback(pipe, step, timestep, callback_kwargs):
             progress = 10 + int((step / req.get("num_steps", 30)) * 85)
