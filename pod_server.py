@@ -352,47 +352,53 @@ class CharacterVariationRequest(BaseModel):
 
 
 # =============================================================================
-# IMAGE GENERATION (Qwen-Image-2512 for text2img, Qwen-Image-Edit-2511 for img2img)
+# IMAGE GENERATION (Qwen-Image-Edit-2511)
+# =============================================================================
+# ARCHITECTURE: Single Qwen-Image-Edit-2511 for ALL image generation
+# - Text-to-image: gray (128,128,128) input + prompt
+# - Image editing: reference image + edit prompt
+# - With LoRA: Same model + character/scene LoRA = perfect consistency
+# - Standard inference (20-40 steps for quality)
 # =============================================================================
 
-def load_qwen_image():
-    """Load Qwen-Image-2512 for text-to-image generation."""
-    if "qwen_image" not in _models:
+def load_qwen_lightning():
+    """Load Qwen-Image-Edit-2511-Lightning for unified image generation.
+
+    This single model handles BOTH:
+    - Text-to-image: Use gray (128,128,128) input image
+    - Image editing: Use reference image
+
+    LoRAs trained on this model work for BOTH use cases,
+    enabling perfect character consistency across all generated images.
+    """
+    if "qwen_lightning" not in _models:
         set_model_loading(True)
         try:
-            # Don't clear VRAM - A100 80GB can hold multiple models
-            print("Loading Qwen-Image-2512 (text-to-image)...")
-            from diffusers import DiffusionPipeline
-            # IMPORTANT: Use bfloat16 - float16 causes black images!
-            pipe = DiffusionPipeline.from_pretrained(
-                MODEL_DIR / "qwen-image",
+            print("Loading Qwen-Image-Edit-2511 (BF16 for inference)...")
+            from diffusers import QwenImageEditPipeline
+
+            pipe = QwenImageEditPipeline.from_pretrained(
+                MODEL_DIR / "qwen-edit-2511",
                 torch_dtype=torch.bfloat16,
             )
+
             pipe.to("cuda")
-            _models["qwen_image"] = pipe
+            _models["qwen_lightning"] = pipe  # Keep key name for compatibility
+            print("Qwen-Image-Edit-2511 loaded (BF16)")
         finally:
             set_model_loading(False)
-    return _models["qwen_image"]
+    return _models["qwen_lightning"]
+
+
+# Legacy aliases for backwards compatibility
+def load_qwen_image():
+    """Load unified Lightning model (legacy alias for text-to-image)."""
+    return load_qwen_lightning()
 
 
 def load_qwen_image_edit():
-    """Load Qwen-Image-Edit-2511 for img2img editing."""
-    if "qwen_image_edit" not in _models:
-        set_model_loading(True)
-        try:
-            # Don't clear VRAM - A100 80GB can hold multiple models
-            print("Loading Qwen-Image-Edit-2511 (img2img)...")
-            from diffusers import QwenImageEditPipeline
-            # IMPORTANT: Use bfloat16 - float16 causes black images!
-            pipe = QwenImageEditPipeline.from_pretrained(
-                MODEL_DIR / "qwen-image-edit",
-                torch_dtype=torch.bfloat16,
-            )
-            pipe.to("cuda")
-            _models["qwen_image_edit"] = pipe
-        finally:
-            set_model_loading(False)
-    return _models["qwen_image_edit"]
+    """Load unified Lightning model (legacy alias for editing)."""
+    return load_qwen_lightning()
 
 
 def _patch_transformers_generation_config():
@@ -426,81 +432,36 @@ _patch_transformers_generation_config()
 
 
 def load_qwen_image_edit_plus():
-    """Load Qwen-Image-Edit-2511 Plus for reference conditioning (WWAA method).
+    """Load Lightning model (legacy alias for plus pipeline).
 
-    This pipeline uses reference image as CONDITIONING, not init image.
-    Generates new images from scratch that maintain character consistency.
-
-    Note: Uses monkey-patched GenerationConfig to fix Qwen2.5-VL dict bug.
+    The Lightning model handles reference conditioning natively.
+    For text-to-image: use gray input
+    For editing: use reference image
     """
-    with _model_ops_lock:  # Prevent race conditions in model loading
-        # Double-check after acquiring lock
-        if "qwen_image_edit_plus" in _models:
-            print(f"[Model Cache] qwen_image_edit_plus already loaded (cache keys: {list(_models.keys())})")
-            return _models["qwen_image_edit_plus"]
-
-        set_model_loading(True)
-        try:
-            # Clear other models to free VRAM (keep only one major model at a time)
-            print(f"[Model Cache] Loading qwen_image_edit_plus (current cache: {list(_models.keys())})")
-            clear_vram(keep_model="qwen_image_edit_plus")
-
-            model_path = MODEL_DIR / "qwen-image-edit"
-            print(f"Loading Qwen-Image-Edit-2511 Plus from {model_path}...")
-            print(f"  Model path exists: {model_path.exists()}")
-            if model_path.exists():
-                print(f"  Contents: {list(model_path.iterdir())[:5]}...")
-
-            from diffusers import QwenImageEditPlusPipeline
-
-            # Try bfloat16 for Plus pipeline - float16 may cause black images
-            print("[Model Cache] Calling from_pretrained (this takes 5-10 min)...")
-            pipe = QwenImageEditPlusPipeline.from_pretrained(
-                model_path,
-                torch_dtype=torch.bfloat16,
-            )
-            print("[Model Cache] from_pretrained complete, moving to CUDA...")
-            pipe.to("cuda")  # Keep on GPU - no CPU offload on high-VRAM GPUs
-            print("[Model Cache] Model on CUDA, caching...")
-            _models["qwen_image_edit_plus"] = pipe
-            print(f"[Model Cache] Successfully loaded qwen_image_edit_plus (cache keys: {list(_models.keys())})")
-        except Exception as e:
-            import traceback
-            print(f"[Model Cache] ERROR loading model: {e}")
-            print(traceback.format_exc())
-            raise  # Re-raise so warmup endpoint catches it
-        finally:
-            set_model_loading(False)
-        return _models["qwen_image_edit_plus"]
+    return load_qwen_lightning()
 
 
-def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
-    """Load Qwen-Image-Edit-2511 Plus with Multiple Angles LoRA for camera control.
+def load_qwen_lightning_with_angles_lora(lora_strength: float = 0.9):
+    """Load Lightning model with Multiple Angles LoRA for camera control.
 
-    Uses QwenImageEditPlusPipeline for proper reference conditioning.
-    The reference image is passed as conditioning (not init latent).
-
-    Note: Uses monkey-patched GenerationConfig to fix Qwen2.5-VL dict bug.
+    Uses the unified Lightning model with the Multiple Angles LoRA.
     """
-    with _model_ops_lock:  # Prevent race conditions in model loading
-        if "qwen_image_edit_angles" not in _models:
+    with _model_ops_lock:
+        if "qwen_lightning_angles" not in _models:
             set_model_loading(True)
             try:
-                # Clear other models to free VRAM (keep only one major model at a time)
-                print(f"[Model Cache] Loading qwen_image_edit_angles (current cache: {list(_models.keys())})")
-                clear_vram(keep_model="qwen_image_edit_angles")
-                print("Loading Qwen-Image-Edit-2511 Plus with Multiple Angles LoRA...")
-                from diffusers import QwenImageEditPlusPipeline
+                print(f"[Model Cache] Loading Lightning with Angles LoRA (current cache: {list(_models.keys())})")
+                clear_vram(keep_model="qwen_lightning_angles")
 
-                # IMPORTANT: Use bfloat16 - float16 causes black images!
-                pipe = QwenImageEditPlusPipeline.from_pretrained(
-                    MODEL_DIR / "qwen-image-edit",
+                from diffusers import QwenImageEditPipeline
+
+                pipe = QwenImageEditPipeline.from_pretrained(
+                    MODEL_DIR / "qwen-edit-2511",
                     torch_dtype=torch.bfloat16,
                 )
 
-                # Move to GPU FIRST before LoRA operations (much faster)
                 pipe.to("cuda")
-                print("Model loaded to GPU")
+                print("Qwen-Image-Edit-2511 loaded to GPU")
 
                 # Load the Multiple Angles LoRA
                 lora_path = MODEL_DIR / "loras" / "multiple-angles"
@@ -510,33 +471,44 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
                     print(f"Loading Multiple Angles LoRA from {lora_file}...")
                     pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
                     print(f"LoRA loaded, will set strength at inference time")
-                    _models["qwen_image_edit_angles_lora_loaded"] = True
+                    _models["qwen_lightning_angles_lora_loaded"] = True
                 else:
                     print(f"Warning: LoRA file not found at {lora_file}, using base model")
-                    _models["qwen_image_edit_angles_lora_loaded"] = False
+                    _models["qwen_lightning_angles_lora_loaded"] = False
 
-                _models["qwen_image_edit_angles"] = pipe
-                print(f"[Model Cache] Successfully loaded qwen_image_edit_angles (cache keys: {list(_models.keys())})")
+                _models["qwen_lightning_angles"] = pipe
+                print(f"[Model Cache] Successfully loaded qwen_lightning_angles")
             finally:
                 set_model_loading(False)
 
-    # Always update LoRA strength before returning (may have changed)
-    pipe = _models["qwen_image_edit_angles"]
-    if _models.get("qwen_image_edit_angles_lora_loaded"):
+    pipe = _models["qwen_lightning_angles"]
+    if _models.get("qwen_lightning_angles_lora_loaded"):
         pipe.set_adapters(["default_0"], adapter_weights=[lora_strength])
         print(f"LoRA strength set to {lora_strength}")
 
     return pipe
 
 
+# Legacy alias
+def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
+    """Legacy alias for load_qwen_lightning_with_angles_lora."""
+    return load_qwen_lightning_with_angles_lora(lora_strength)
+
+
 def _run_image_generation(job_id: str, req: dict):
-    """Background worker for image generation."""
+    """Background worker for text-to-image generation using Lightning.
+
+    Uses gray (128,128,128) input image for text-to-image mode.
+    The Lightning model treats this as "generate from scratch".
+    """
     try:
-        print(f"[{job_id}] Starting text-to-image generation...")
+        from PIL import Image as PILImage
+
+        print(f"[{job_id}] Starting text-to-image generation (Lightning)...")
         update_job(job_id, status="running", progress=5)
 
-        print(f"[{job_id}] Loading Qwen-Image-2512...")
-        pipe = load_qwen_image()
+        print(f"[{job_id}] Loading Qwen-Image-Edit-Lightning...")
+        pipe = load_qwen_lightning()
         print(f"[{job_id}] Model loaded, dtype: {pipe.transformer.dtype}")
         update_job(job_id, progress=10)
 
@@ -545,7 +517,15 @@ def _run_image_generation(job_id: str, req: dict):
         generator = torch.Generator("cuda").manual_seed(actual_seed)
         print(f"[{job_id}] Using seed: {actual_seed}")
 
+        # Lightning model: 4 steps is optimal (vs 28-40 for full model)
         total_steps = req.get("num_steps", 28)
+        width = req.get("width", 1024)
+        height = req.get("height", 1024)
+
+        # Create gray input image for text-to-image mode
+        # The edit model will replace it entirely with the prompted content
+        gray_image = PILImage.new("RGB", (width, height), (128, 128, 128))
+
         print(f"[{job_id}] Prompt: {req['prompt'][:100]}...")
         print(f"[{job_id}] Starting inference with {total_steps} steps...")
 
@@ -553,17 +533,15 @@ def _run_image_generation(job_id: str, req: dict):
         def progress_callback(pipe, step, timestep, callback_kwargs):
             progress = 10 + int((step / total_steps) * 85)
             update_job(job_id, progress=progress)
-            if step % 10 == 0:
-                print(f"[{job_id}] Step {step}/{total_steps}")
             return callback_kwargs
 
         image = pipe(
             prompt=req["prompt"],
-            negative_prompt=req.get("negative_prompt") or None,
-            width=req.get("width", 1024),
-            height=req.get("height", 1024),
+            image=gray_image,  # Gray input for text-to-image
+            width=width,
+            height=height,
             num_inference_steps=total_steps,
-            true_cfg_scale=req.get("guidance", 3.5),
+            guidance_scale=req.get("guidance", 3.5),
             generator=generator,
             callback_on_step_end=progress_callback,
         ).images[0]
@@ -584,10 +562,13 @@ def _run_image_generation(job_id: str, req: dict):
             job_id,
             status="complete",
             progress=100,
-            result={"image_base64": image_b64, "path": str(path)},
+            result={"image_base64": image_b64, "path": str(path), "seed": actual_seed},
         )
 
     except Exception as e:
+        import traceback
+        print(f"[{job_id}] Error: {e}")
+        print(traceback.format_exc())
         update_job(job_id, status="failed", error=str(e))
 
 
@@ -604,14 +585,17 @@ async def generate_image(req: GenerateImageRequest):
 # =============================================================================
 
 def _run_image_edit(job_id: str, req: dict):
-    """Background worker for image editing/reposing using Qwen-Image-Edit-2511."""
+    """Background worker for image editing using Lightning model.
+
+    Uses the same model as text-to-image but with reference image input.
+    """
     try:
         from PIL import Image
 
         update_job(job_id, status="running", progress=5)
 
-        # Use the dedicated edit model
-        pipe = load_qwen_image_edit()
+        # Use unified Lightning model
+        pipe = load_qwen_lightning()
         update_job(job_id, progress=10)
 
         # Decode input image
@@ -624,8 +608,8 @@ def _run_image_edit(job_id: str, req: dict):
         generator = torch.Generator("cuda").manual_seed(actual_seed)
         print(f"[{job_id}] Using seed: {actual_seed}")
 
-        # Optimal settings for Qwen-Image-Edit-2511
-        total_steps = req.get("num_steps", 40)  # Recommended: 40 steps
+        # Lightning model: 4 steps is optimal
+        total_steps = req.get("num_steps", 28)
 
         # Create progress callback
         def progress_callback(pipe, step, timestep, callback_kwargs):
@@ -633,17 +617,14 @@ def _run_image_edit(job_id: str, req: dict):
             update_job(job_id, progress=progress)
             return callback_kwargs
 
-        # QwenImageEditPipeline: optimized parameters per official docs
-        # Note: minimal negative_prompt recommended for this model
+        # Lightning model simplified parameters
         image = pipe(
             prompt=req["prompt"],
-            negative_prompt=req.get("negative_prompt") or " ",  # Space = minimal negative guidance
             image=input_image,
             height=req.get("height", 1024),
             width=req.get("width", 1024),
             num_inference_steps=total_steps,
-            guidance_scale=1.0,  # Recommended: 1.0
-            true_cfg_scale=req.get("guidance", 4.0),  # Recommended: 4.0
+            guidance_scale=req.get("guidance", 3.5),
             generator=generator,
             callback_on_step_end=progress_callback,
         ).images[0]
@@ -662,7 +643,7 @@ def _run_image_edit(job_id: str, req: dict):
             job_id,
             status="complete",
             progress=100,
-            result={"image_base64": image_b64, "path": str(path)},
+            result={"image_base64": image_b64, "path": str(path), "seed": actual_seed},
         )
 
     except Exception as e:
@@ -1222,18 +1203,26 @@ async def synthesize_voice(req: SynthesizeVoiceRequest):
 
 
 # =============================================================================
-# LORA TRAINING
+# LORA TRAINING (for Qwen-Image-Edit-2511 with FP8)
+# =============================================================================
+# Trains LoRAs using FP8 quantization for faster training (~16GB VRAM vs 40GB).
+# Same LoRA works for generating first frames AND editing last frames.
 # =============================================================================
 
 @app.post("/train_lora")
 async def train_lora(req: TrainLoRARequest):
-    """Train Qwen-Image LoRA from a zip URL containing images and captions.
+    """Train Qwen-Image-Edit-2511 LoRA from a zip URL.
 
     The zip should contain images (png/jpg) with matching .txt caption files.
-    Uses DiffSynth-Studio or PEFT for Qwen-Image-2512 training.
+    Uses DiffSynth-Studio with FP8 quantization for faster training.
+
+    Caption format: "{trigger_word}, pose, angle, background, style"
+    Example: "project_luna, standing pose, front view, forest, 3D animated"
+    NOTE: Do NOT include physical appearance - trigger word encodes that.
     """
     import zipfile
     import shutil
+    import os
     from urllib.request import urlretrieve
 
     clear_vram()
@@ -1260,76 +1249,80 @@ async def train_lora(req: TrainLoRARequest):
     if image_count < 5:
         raise HTTPException(400, f"Need at least 5 images, got {image_count}")
 
-    print(f"Training Qwen-Image LoRA '{req.lora_name}' with {image_count} images...")
+    print(f"Training FP8 LoRA '{req.lora_name}' with {image_count} images...")
 
-    # Check if DiffSynth-Studio is available
+    # Check for DiffSynth-Studio
     diffsynth_path = Path("/workspace/DiffSynth-Studio")
-    if diffsynth_path.exists():
-        # Create metadata CSV for DiffSynth
-        metadata_path = images_dir / "metadata.csv"
-        with open(metadata_path, "w") as f:
-            f.write("image,prompt\n")  # DiffSynth expects "image" column, not "file_name"
-            for img_path in images_dir.glob("**/*.png"):
-                caption_path = img_path.with_suffix(".txt")
-                if caption_path.exists():
-                    caption = caption_path.read_text().strip().replace('"', '""')
-                    f.write(f'"{img_path.name}","{caption}"\n')
-            for img_path in images_dir.glob("**/*.jpg"):
-                caption_path = img_path.with_suffix(".txt")
-                if caption_path.exists():
-                    caption = caption_path.read_text().strip().replace('"', '""')
-                    f.write(f'"{img_path.name}","{caption}"\n')
+    if not diffsynth_path.exists():
+        raise HTTPException(500, "DiffSynth-Studio not found")
 
-        cmd = [
-            "accelerate", "launch",
-            str(diffsynth_path / "examples" / "qwen_image" / "model_training" / "train.py"),
-            "--dataset_base_path", str(images_dir),
-            "--dataset_metadata_path", str(metadata_path),
-            "--max_pixels", str(req.resolution * req.resolution),
-            "--dataset_repeat", "50",
-            "--model_id_with_origin_paths", "Qwen/Qwen-Image-2512:transformer/diffusion_pytorch_model*.safetensors,Qwen/Qwen-Image:text_encoder/model*.safetensors,Qwen/Qwen-Image:vae/diffusion_pytorch_model.safetensors",
-            "--learning_rate", str(req.learning_rate),
-            "--num_epochs", str(req.num_epochs),
-            "--remove_prefix_in_ckpt", "pipe.dit.",
-            "--output_path", str(output_dir / req.lora_name),
-            "--lora_base_model", "dit",
-            "--lora_target_modules", "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1",
-            "--lora_rank", str(req.network_rank),
-            "--use_gradient_checkpointing",
-            "--dataset_num_workers", "4",
-            "--find_unused_parameters",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    # Create metadata CSV for DiffSynth
+    metadata_path = images_dir / "metadata.csv"
+    with open(metadata_path, "w") as f:
+        f.write("image,prompt\n")
+        for img_path in images_dir.glob("**/*.png"):
+            caption_path = img_path.with_suffix(".txt")
+            if caption_path.exists():
+                caption = caption_path.read_text().strip().replace('"', '""')
+                f.write(f'"{img_path.name}","{caption}"\n')
+        for img_path in images_dir.glob("**/*.jpg"):
+            caption_path = img_path.with_suffix(".txt")
+            if caption_path.exists():
+                caption = caption_path.read_text().strip().replace('"', '""')
+                f.write(f'"{img_path.name}","{caption}"\n')
 
-        # DiffSynth saves to output_path directory with epoch suffix
-        lora_path = output_dir / req.lora_name / f"epoch_{req.num_epochs}.safetensors"
-        if not lora_path.exists():
-            for pattern in [output_dir / req.lora_name / "*.safetensors"]:
-                matches = list(pattern.parent.glob(pattern.name))
-                if matches:
-                    lora_path = matches[-1]
-                    break
-    else:
-        # Fallback to Kohya SDXL (legacy, not recommended for Qwen-Image)
-        print("WARNING: DiffSynth not available, falling back to Kohya SDXL training")
-        cmd = [
-            "accelerate", "launch",
-            "/workspace/sd-scripts/sdxl_train_network.py",
-            "--pretrained_model_name_or_path", "stabilityai/stable-diffusion-xl-base-1.0",
-            "--train_data_dir", str(images_dir),
-            "--output_dir", str(output_dir),
-            "--output_name", req.lora_name,
-            "--max_train_epochs", str(req.num_epochs),
-            "--learning_rate", str(req.learning_rate),
-            "--network_dim", str(req.network_rank),
-            "--network_alpha", str(req.network_alpha),
-            "--resolution", f"{req.resolution},{req.resolution}",
-            "--mixed_precision", "bf16",
-            "--network_module", "networks.lora",
-            "--cache_latents",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
-        lora_path = output_dir / f"{req.lora_name}.safetensors"
+    # Use Qwen-Image-Edit-2511 with FP8 quantization for faster training
+    os.environ["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
+    model_root = "/workspace/models/qwen-edit-2511"
+    model_paths = (
+        f"{model_root}:transformer/diffusion_pytorch_model*.safetensors,"
+        f"{model_root}:text_encoder/model*.safetensors,"
+        f"{model_root}:vae/diffusion_pytorch_model.safetensors"
+    )
+
+    # FP8 transformer for faster training (base model frozen, only LoRA trained)
+    fp8_transformer = "/workspace/models/qwen-edit-2511-fp8/qwen_image_edit_2511_fp8_e4m3fn.safetensors"
+    fp8_path = f"{fp8_transformer}:transformer/diffusion_pytorch_model*.safetensors"
+
+    cmd = [
+        "python",
+        str(diffsynth_path / "examples" / "qwen_image" / "model_training" / "train.py"),
+        "--dataset_base_path", str(images_dir),
+        "--dataset_metadata_path", str(metadata_path),
+        "--max_pixels", str(req.resolution * req.resolution),
+        "--dataset_repeat", "50",
+        "--model_id_with_origin_paths", model_paths,
+        "--fp8_models", fp8_path,  # Use FP8 for transformer (faster training)
+        "--tokenizer_path", model_root,
+        "--processor_path", model_root,
+        "--learning_rate", str(req.learning_rate),
+        "--num_epochs", str(req.num_epochs),
+        "--remove_prefix_in_ckpt", "pipe.dit.",
+        "--output_path", str(output_dir / req.lora_name),
+        "--lora_base_model", "dit",
+        "--lora_target_modules", "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1",
+        "--lora_rank", str(req.network_rank),
+        "--use_gradient_checkpointing",
+        "--dataset_num_workers", "4",
+        "--find_unused_parameters",
+    ]
+
+    env = os.environ.copy()
+    env["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, env=env)
+
+    # Find the LoRA file
+    lora_path = output_dir / req.lora_name / f"epoch_{req.num_epochs}.safetensors"
+    if not lora_path.exists():
+        for pattern in [
+            output_dir / req.lora_name / "*.safetensors",
+            output_dir / f"{req.lora_name}.safetensors",
+        ]:
+            matches = list(Path("/").glob(str(pattern).lstrip("/")))
+            if matches:
+                lora_path = matches[-1]
+                break
 
     if not lora_path.exists():
         raise HTTPException(500, f"Training failed: {result.stderr[-500:]}")
@@ -1339,6 +1332,7 @@ async def train_lora(req: TrainLoRARequest):
         "size_mb": lora_path.stat().st_size / (1024*1024),
         "log": result.stdout[-1000:],
         "images_trained": image_count,
+        "model": "qwen-edit-2511-fp8",
     }
 
 
@@ -1355,7 +1349,11 @@ class TrainLoRABase64Request(BaseModel):
 
 
 def _run_lora_training_base64(job_id: str, req_dict: dict):
-    """Background worker for LoRA training from base64 images."""
+    """Background worker for LoRA training from base64 images.
+
+    Uses DiffSynth-Studio with FP8 quantization for faster training.
+    The trained LoRA works for BOTH text-to-image AND image editing.
+    """
     import shutil
     import os
 
@@ -1375,7 +1373,7 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
         # Check if DiffSynth-Studio is available
         diffsynth_path = Path("/workspace/DiffSynth-Studio")
         if diffsynth_path.exists():
-            print(f"[{job_id}] Using DiffSynth-Studio for training...")
+            print(f"[{job_id}] Using DiffSynth-Studio with FP8 quantization...")
 
             # Create metadata CSV
             metadata_path = images_dir / "metadata.csv"
@@ -1394,13 +1392,18 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
 
             update_job(job_id, progress=15)
 
+            # Use Qwen-Image-Edit-2511 with FP8 quantization for faster training
             os.environ["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
+            model_root = "/workspace/models/qwen-edit-2511"
             model_paths = (
-                "Qwen/Qwen-Image-2512:transformer/diffusion_pytorch_model*.safetensors,"
-                "Qwen/Qwen-Image-2512:text_encoder/model*.safetensors,"
-                "Qwen/Qwen-Image-2512:vae/diffusion_pytorch_model.safetensors"
+                f"{model_root}:transformer/diffusion_pytorch_model*.safetensors,"
+                f"{model_root}:text_encoder/model*.safetensors,"
+                f"{model_root}:vae/diffusion_pytorch_model.safetensors"
             )
-            model_root = "/workspace/models/Qwen/Qwen-Image-2512"
+
+            # FP8 transformer for faster training (base model frozen, only LoRA trained)
+            fp8_transformer = "/workspace/models/qwen-edit-2511-fp8/qwen_image_edit_2511_fp8_e4m3fn.safetensors"
+            fp8_path = f"{fp8_transformer}:transformer/diffusion_pytorch_model*.safetensors"
 
             cmd = [
                 "python",
@@ -1410,6 +1413,7 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
                 "--max_pixels", str(req_dict['resolution'] * req_dict['resolution']),
                 "--dataset_repeat", "50",
                 "--model_id_with_origin_paths", model_paths,
+                "--fp8_models", fp8_path,  # Use FP8 for transformer (faster training)
                 "--tokenizer_path", model_root,
                 "--processor_path", model_root,
                 "--learning_rate", str(req_dict['learning_rate']),
@@ -1427,12 +1431,11 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
             env = os.environ.copy()
             env["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
 
-            print(f"[{job_id}] Running DiffSynth training (this may take 30-60 min)...")
+            print(f"[{job_id}] Running DiffSynth training with FP8 quantization...")
             update_job(job_id, progress=20)
 
             # Use Popen to stream output and parse progress
             import re
-            import select
 
             process = subprocess.Popen(
                 cmd,

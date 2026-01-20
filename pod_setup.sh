@@ -130,26 +130,33 @@ pip uninstall bitsandbytes -y 2>/dev/null || true
 echo "=== Downloading Models ==="
 
 # Download models (this takes a while first time)
+# Architecture: Unified Qwen-Image-Edit-2511-Lightning for ALL image generation
+# - Text-to-image: Use gray (128,128,128) input + prompt
+# - Image editing: Use reference image + edit prompt
+# - With LoRA: Same model + character/scene LoRA for consistency
 python3 << 'EOF'
 import os
 os.environ["HF_HOME"] = "/workspace/models"
 
 from huggingface_hub import snapshot_download
 
-print("Downloading Qwen-Image-2512 (text-to-image)...")
-snapshot_download("Qwen/Qwen-Image-2512", local_dir="/workspace/models/qwen-image")
+# Qwen-Image-Edit-2511 with FP8 transformer for faster training
+# Download base model (for VAE, text encoder, configs)
+print("Downloading Qwen-Image-Edit-2511 base model...")
+snapshot_download("Qwen/Qwen-Image-Edit-2511", local_dir="/workspace/models/qwen-edit-2511")
 
-print("Downloading Qwen-Image-Edit-2511 (img2img editing)...")
-snapshot_download("Qwen/Qwen-Image-Edit-2511", local_dir="/workspace/models/qwen-image-edit")
+# Download FP8 quantized transformer (replaces BF16 transformer for faster training)
+print("Downloading FP8 transformer (20GB, faster training)...")
+from huggingface_hub import hf_hub_download
+hf_hub_download(
+    repo_id="drbaph/Qwen-Image-Edit-2511-FP8",
+    filename="qwen_image_edit_2511_fp8_e4m3fn.safetensors",
+    local_dir="/workspace/models/qwen-edit-2511-fp8"
+)
 
-# Wan 2.2 I2V - Image to Video (supports BOTH single image AND first+last frame modes)
-# This is the model for video generation - can do I2V or FLF (first-last-frame) with same model
-# Using bf16 variant for better quality and LoRA training compatibility
-print("Downloading Wan 2.2 I2V (Image/First-Last-Frame to Video)...")
-snapshot_download("Wan-AI/Wan2.2-I2V-A14B-Diffusers", local_dir="/workspace/models/wan-i2v")
-# Also get the bf16 transformers for better quality
-print("Downloading Wan 2.2 I2V bf16 transformers...")
-snapshot_download("cbensimon/Wan2.2-I2V-A14B-bf16-Diffusers", local_dir="/workspace/models/wan-i2v-bf16")
+# Wan 2.1 FLF2V - First-Last-Frame to Video (for scene animation)
+print("Downloading Wan 2.1 FLF2V (First-Last-Frame to Video)...")
+snapshot_download("Wan-AI/Wan2.1-FLF2V-14B-720P-diffusers", local_dir="/workspace/models/wan-flf2v")
 
 print("Downloading Parler-TTS...")
 snapshot_download("parler-tts/parler-tts-mini-v1", local_dir="/workspace/models/parler-tts")
@@ -159,56 +166,19 @@ snapshot_download("fishaudio/fish-speech-1.4", local_dir="/workspace/models/fish
 
 print("Downloading LoRAs...")
 
-# Multiple Angles LoRA for scene camera control
+# Multiple Angles LoRA for scene camera control (compatible with Lightning)
 print("  - Multiple Angles LoRA (scene camera control)...")
 snapshot_download(
     "fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA",
     local_dir="/workspace/models/loras/multiple-angles"
 )
 
-# Turbo LoRA for 20x faster text-to-image (4-8 steps instead of 30-40)
-print("  - Turbo LoRA (speed boost)...")
-snapshot_download(
-    "Wuli-art/Qwen-Image-2512-Turbo-LoRA",
-    local_dir="/workspace/models/loras/turbo"
-)
-
 print("=== All models downloaded! ===")
-
-# Fix Qwen-Image for DiffSynth-Studio LoRA training
-print("Setting up Qwen-Image for DiffSynth LoRA training...")
-
-import os
-import shutil
-from pathlib import Path
-from huggingface_hub import hf_hub_download
-
-qwen_image_dir = Path("/workspace/models/qwen-image")
-
-# 1. Create symlink for DiffSynth model path format (expects Qwen/Qwen-Image-2512)
-symlink_dir = Path("/workspace/models/Qwen")
-symlink_dir.mkdir(exist_ok=True)
-symlink_path = symlink_dir / "Qwen-Image-2512"
-if symlink_path.exists() or symlink_path.is_symlink():
-    symlink_path.unlink()
-symlink_path.symlink_to(qwen_image_dir)
-print(f"  Created symlink: {symlink_path} -> {qwen_image_dir}")
-
-# 2. Download preprocessor_config.json (needed for Qwen2VLProcessor)
-print("  Downloading preprocessor_config.json...")
-hf_hub_download('Qwen/Qwen2-VL-7B-Instruct', 'preprocessor_config.json', local_dir=str(qwen_image_dir))
-
-# 3. Copy tokenizer files to root (processor needs them alongside preprocessor_config.json)
-tokenizer_dir = qwen_image_dir / "tokenizer"
-if tokenizer_dir.exists():
-    print("  Copying tokenizer files to model root...")
-    for f in tokenizer_dir.iterdir():
-        dest = qwen_image_dir / f.name
-        if not dest.exists():
-            shutil.copy2(f, dest)
-            print(f"    Copied {f.name}")
-
-print("=== Qwen-Image setup complete! ===")
+print("")
+print("Architecture: Qwen-Image-Edit-2511 with FP8 training")
+print("  - Base model: BF16 (for inference)")
+print("  - FP8 transformer: For faster LoRA training (~16GB VRAM vs 40GB)")
+print("  - LoRAs trained work for BOTH text-to-image AND editing")
 EOF
 
 echo ""
