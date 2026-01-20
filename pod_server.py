@@ -1295,8 +1295,8 @@ async def train_lora(req: TrainLoRARequest):
         "--dataset_repeat", "50",
         "--model_id_with_origin_paths", model_paths,
         "--fp8_models", fp8_path,  # Use FP8 for transformer (faster training)
-        "--tokenizer_path", model_root,
-        "--processor_path", model_root,
+        "--tokenizer_path", f"{model_root}/processor",
+        "--processor_path", f"{model_root}/processor",
         "--learning_rate", str(req.learning_rate),
         "--num_epochs", str(req.num_epochs),
         "--remove_prefix_in_ckpt", "pipe.dit.",
@@ -1418,8 +1418,8 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
                 "--dataset_repeat", "50",
                 "--model_id_with_origin_paths", model_paths,
                 "--fp8_models", fp8_path,  # Use FP8 for transformer (faster training)
-                "--tokenizer_path", model_root,
-                "--processor_path", model_root,
+                "--tokenizer_path", f"{model_root}/processor",
+                "--processor_path", f"{model_root}/processor",
                 "--learning_rate", str(req_dict['learning_rate']),
                 "--num_epochs", str(req_dict['num_epochs']),
                 "--remove_prefix_in_ckpt", "pipe.dit.",
