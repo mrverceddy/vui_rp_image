@@ -316,7 +316,9 @@ class TrainLoRARequest(BaseModel):
     learning_rate: float = 1e-4
     network_rank: int = 32
     network_alpha: int = 16
-    resolution: int = 1024
+    width: int = 1024  # Training image width (pass actual image dimensions)
+    height: int = 576  # Training image height (16:9 default)
+    dataset_repeat: int = 22  # Reduced from 50 for faster training
 
 
 class SceneAngleRequest(BaseModel):
@@ -1291,8 +1293,8 @@ async def train_lora(req: TrainLoRARequest):
         str(diffsynth_path / "examples" / "qwen_image" / "model_training" / "train.py"),
         "--dataset_base_path", str(images_dir),
         "--dataset_metadata_path", str(metadata_path),
-        "--max_pixels", str(req.resolution * req.resolution),
-        "--dataset_repeat", "50",
+        "--max_pixels", str(req.width * req.height),  # Use actual image dimensions (16:9 support)
+        "--dataset_repeat", str(req.dataset_repeat),  # Configurable, default 22
         "--model_id_with_origin_paths", model_paths,
         "--fp8_models", fp8_path,  # Use FP8 for transformer (faster training)
         "--tokenizer_path", f"{model_root}/processor",
@@ -1305,7 +1307,7 @@ async def train_lora(req: TrainLoRARequest):
         "--lora_target_modules", "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1",
         "--lora_rank", str(req.network_rank),
         "--use_gradient_checkpointing",
-        "--dataset_num_workers", "4",
+        "--dataset_num_workers", "8",  # Increased from 4 for better throughput
         "--find_unused_parameters",
     ]
 
@@ -1347,7 +1349,9 @@ class TrainLoRABase64Request(BaseModel):
     learning_rate: float = 1e-4
     network_rank: int = 32
     network_alpha: int = 16
-    resolution: int = 1024
+    width: int = 1024  # Training image width (pass actual image dimensions)
+    height: int = 576  # Training image height (16:9 default)
+    dataset_repeat: int = 22  # Reduced from 50 for faster training
 
 
 def _run_lora_training_base64(job_id: str, req_dict: dict):
@@ -1414,8 +1418,8 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
                 str(diffsynth_path / "examples" / "qwen_image" / "model_training" / "train.py"),
                 "--dataset_base_path", str(images_dir),
                 "--dataset_metadata_path", str(metadata_path),
-                "--max_pixels", str(req_dict['resolution'] * req_dict['resolution']),
-                "--dataset_repeat", "50",
+                "--max_pixels", str(req_dict['width'] * req_dict['height']),  # Use actual image dimensions (16:9 support)
+                "--dataset_repeat", str(req_dict.get('dataset_repeat', 22)),  # Configurable, default 22
                 "--model_id_with_origin_paths", model_paths,
                 "--fp8_models", fp8_path,  # Use FP8 for transformer (faster training)
                 "--tokenizer_path", f"{model_root}/processor",
@@ -1428,7 +1432,7 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
                 "--lora_target_modules", "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1",
                 "--lora_rank", str(req_dict['network_rank']),
                 "--use_gradient_checkpointing",
-                "--dataset_num_workers", "4",
+                "--dataset_num_workers", "8",  # Increased from 4 for better throughput
                 "--find_unused_parameters",
             ]
 
