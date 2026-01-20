@@ -378,7 +378,7 @@ def load_qwen_lightning():
             from diffusers import QwenImageEditPipeline
 
             pipe = QwenImageEditPipeline.from_pretrained(
-                MODEL_DIR / "qwen-edit-2511",
+                MODEL_DIR / "Qwen" / "Qwen-Image-Edit-2511",
                 torch_dtype=torch.bfloat16,
             )
 
@@ -456,7 +456,7 @@ def load_qwen_lightning_with_angles_lora(lora_strength: float = 0.9):
                 from diffusers import QwenImageEditPipeline
 
                 pipe = QwenImageEditPipeline.from_pretrained(
-                    MODEL_DIR / "qwen-edit-2511",
+                    MODEL_DIR / "Qwen" / "Qwen-Image-Edit-2511",
                     torch_dtype=torch.bfloat16,
                 )
 
@@ -1272,13 +1272,15 @@ async def train_lora(req: TrainLoRARequest):
                 f.write(f'"{img_path.name}","{caption}"\n')
 
     # Use Qwen-Image-Edit-2511 with FP8 quantization for faster training
+    # DiffSynth expects HuggingFace model ID format with DIFFSYNTH_MODEL_BASE_PATH
     os.environ["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
-    model_root = "/workspace/models/qwen-edit-2511"
+    model_id = "Qwen/Qwen-Image-Edit-2511"
     model_paths = (
-        f"{model_root}:transformer/diffusion_pytorch_model*.safetensors,"
-        f"{model_root}:text_encoder/model*.safetensors,"
-        f"{model_root}:vae/diffusion_pytorch_model.safetensors"
+        f"{model_id}:transformer/diffusion_pytorch_model*.safetensors,"
+        f"{model_id}:text_encoder/model*.safetensors,"
+        f"{model_id}:vae/diffusion_pytorch_model.safetensors"
     )
+    model_root = f"/workspace/models/{model_id}"
 
     # FP8 transformer for faster training (base model frozen, only LoRA trained)
     fp8_transformer = "/workspace/models/qwen-edit-2511-fp8/qwen_image_edit_2511_fp8_e4m3fn.safetensors"
@@ -1393,13 +1395,15 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
             update_job(job_id, progress=15)
 
             # Use Qwen-Image-Edit-2511 with FP8 quantization for faster training
+            # DiffSynth expects HuggingFace model ID format with DIFFSYNTH_MODEL_BASE_PATH
             os.environ["DIFFSYNTH_MODEL_BASE_PATH"] = "/workspace/models"
-            model_root = "/workspace/models/qwen-edit-2511"
+            model_id = "Qwen/Qwen-Image-Edit-2511"
             model_paths = (
-                f"{model_root}:transformer/diffusion_pytorch_model*.safetensors,"
-                f"{model_root}:text_encoder/model*.safetensors,"
-                f"{model_root}:vae/diffusion_pytorch_model.safetensors"
+                f"{model_id}:transformer/diffusion_pytorch_model*.safetensors,"
+                f"{model_id}:text_encoder/model*.safetensors,"
+                f"{model_id}:vae/diffusion_pytorch_model.safetensors"
             )
+            model_root = f"/workspace/models/{model_id}"
 
             # FP8 transformer for faster training (base model frozen, only LoRA trained)
             fp8_transformer = "/workspace/models/qwen-edit-2511-fp8/qwen_image_edit_2511_fp8_e4m3fn.safetensors"

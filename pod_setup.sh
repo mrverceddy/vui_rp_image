@@ -141,9 +141,9 @@ os.environ["HF_HOME"] = "/workspace/models"
 from huggingface_hub import snapshot_download
 
 # Qwen-Image-Edit-2511 with FP8 transformer for faster training
-# Download base model (for VAE, text encoder, configs)
+# Download base model to path DiffSynth expects: /workspace/models/Qwen/Qwen-Image-Edit-2511
 print("Downloading Qwen-Image-Edit-2511 base model...")
-snapshot_download("Qwen/Qwen-Image-Edit-2511", local_dir="/workspace/models/qwen-edit-2511")
+snapshot_download("Qwen/Qwen-Image-Edit-2511", local_dir="/workspace/models/Qwen/Qwen-Image-Edit-2511")
 
 # Download FP8 quantized transformer (replaces BF16 transformer for faster training)
 print("Downloading FP8 transformer (20GB, faster training)...")
