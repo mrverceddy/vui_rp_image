@@ -1508,13 +1508,20 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
                             last_reported_progress = progress
                             print(f"[{job_id}] Training progress: {progress}% (epoch {current_epoch}/{num_epochs})")
 
-                    # Also check tqdm percentage directly
-                    if tqdm_match:
+                    # Also check tqdm percentage directly - but it's EPOCH progress, not overall!
+                    if tqdm_match and num_epochs > 0:
                         tqdm_pct = int(tqdm_match.group(1))
-                        progress = 20 + int(tqdm_pct * 0.70)  # Map 0-100% to 20-90%
+                        # tqdm shows progress within current epoch, calculate overall progress
+                        # current_epoch starts at 1 for epoch 1, so completed = current_epoch - 1
+                        completed_epochs = max(0, current_epoch - 1)
+                        epoch_fraction = tqdm_pct / 100.0
+                        overall_progress = (completed_epochs + epoch_fraction) / num_epochs
+                        progress = 20 + int(overall_progress * 70)  # Map to 20-90% range
+                        progress = min(90, max(20, progress))
                         if progress >= last_reported_progress + 2:
                             update_job(job_id, progress=progress)
                             last_reported_progress = progress
+                            print(f"[{job_id}] Training progress: {progress}% (epoch {current_epoch}/{num_epochs}, {tqdm_pct}% of epoch)")
 
                 process.wait(timeout=7200)
                 returncode = process.returncode
