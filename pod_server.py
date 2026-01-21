@@ -1752,6 +1752,63 @@ async def download(filename: str):
     return FileResponse(path)
 
 
+LORA_DIR = Path("/workspace/loras")
+
+
+@app.get("/list_loras")
+async def list_loras():
+    """List all trained LoRAs and their epoch files."""
+    if not LORA_DIR.exists():
+        return {"loras": []}
+
+    loras = []
+    for lora_dir in LORA_DIR.iterdir():
+        if lora_dir.is_dir():
+            epochs = []
+            for f in sorted(lora_dir.glob("*.safetensors")):
+                epochs.append({
+                    "filename": f.name,
+                    "size_mb": round(f.stat().st_size / (1024*1024), 2),
+                    "modified": f.stat().st_mtime
+                })
+            if epochs:
+                loras.append({
+                    "name": lora_dir.name,
+                    "epochs": epochs
+                })
+    return {"loras": loras}
+
+
+@app.get("/download_lora/{lora_name}/{filename}")
+async def download_lora(lora_name: str, filename: str):
+    """Download a specific LoRA epoch file."""
+    path = LORA_DIR / lora_name / filename
+    if not path.exists():
+        raise HTTPException(404, f"LoRA file not found: {lora_name}/{filename}")
+    return FileResponse(path, filename=filename)
+
+
+@app.get("/download_lora_all/{lora_name}")
+async def download_lora_all(lora_name: str):
+    """Download all epoch files for a LoRA as a zip."""
+    import zipfile
+    lora_path = LORA_DIR / lora_name
+    if not lora_path.exists():
+        raise HTTPException(404, f"LoRA not found: {lora_name}")
+
+    epoch_files = sorted(lora_path.glob("*.safetensors"))
+    if not epoch_files:
+        raise HTTPException(404, f"No epoch files found for: {lora_name}")
+
+    # Create zip in memory
+    zip_path = OUTPUT_DIR / f"{lora_name}_all_epochs.zip"
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for f in epoch_files:
+            zf.write(f, f.name)
+
+    return FileResponse(zip_path, filename=f"{lora_name}_all_epochs.zip")
+
+
 @app.on_event("startup")
 async def startup_preload():
     """Startup event - models loaded on-demand now (no preload)."""
