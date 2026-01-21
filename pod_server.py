@@ -717,10 +717,17 @@ def _run_generate_with_lora(job_id: str, req: dict):
         pipe = load_qwen_lightning()
         update_job(job_id, progress=20)
 
-        # Load custom LoRA
+        # Unload any existing LoRA from previous calls (they accumulate on cached pipeline)
+        try:
+            pipe.unload_lora_weights()
+        except Exception:
+            pass  # No LoRA loaded yet, that's fine
+
+        # Load custom LoRA with explicit adapter name
+        adapter_name = "custom_lora"
         print(f"[{job_id}] Applying LoRA from {lora_file} with strength {lora_strength}...")
-        pipe.load_lora_weights(str(lora_dir), weight_name=lora_file.name)
-        pipe.set_adapters(["default"], adapter_weights=[lora_strength])
+        pipe.load_lora_weights(str(lora_dir), weight_name=lora_file.name, adapter_name=adapter_name)
+        pipe.set_adapters([adapter_name], adapter_weights=[lora_strength])
         update_job(job_id, progress=30)
 
         # Handle input image (for img2img) or create gray placeholder (for text-to-image)
