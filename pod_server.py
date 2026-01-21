@@ -31,6 +31,8 @@ from pydantic import BaseModel
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/workspace/models"))
 OUTPUT_DIR = Path("/workspace/outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+LORA_OUTPUT_DIR = Path("/workspace/loras")
+LORA_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="StoryGen GPU Server")
 
@@ -327,12 +329,18 @@ class SceneAngleRequest(BaseModel):
     azimuth: str = "front view"  # front view, right side view, back view, left side view, etc.
     elevation: str = "eye-level shot"  # low-angle shot, eye-level shot, elevated shot, high-angle shot
     distance: str = "medium shot"  # close-up, medium shot, wide shot
-    additional_prompt: str = ""  # Optional additional context
-    width: int = 1664  # 16:9 - Qwen supported resolution
-    height: int = 928
-    num_steps: int = 40
-    guidance: float = 4.0
+
+
+class GenerateWithLoRARequest(BaseModel):
+    """Request for image generation with custom trained LoRA."""
+    prompt: str
+    lora_name: str  # Name of the trained LoRA (e.g., "myproject_characters")
     lora_strength: float = 0.9
+    image_base64: Optional[str] = None  # Optional input image for img2img
+    width: int = 1280
+    height: int = 720
+    num_steps: int = 28
+    guidance: float = 3.5
     seed: int = -1
 
 
@@ -664,6 +672,133 @@ async def edit_image(req: EditImageRequest):
     """
     job_id = create_job()
     _executor.submit(_run_image_edit, job_id, req.model_dump())
+    return {"job_id": job_id, "status": "pending"}
+
+
+# =============================================================================
+# GENERATE WITH CUSTOM LoRA (Character/Scene LoRAs)
+# =============================================================================
+
+def _run_generate_with_lora(job_id: str, req: dict):
+    """Background worker for image generation with custom trained LoRA.
+
+    Loads base Lightning model + custom LoRA for character/scene consistency.
+    Supports both text-to-image (no input image) and img2img (with input image).
+    """
+    try:
+        from PIL import Image
+
+        update_job(job_id, status="running", progress=5)
+
+        lora_name = req["lora_name"]
+        lora_strength = req.get("lora_strength", 0.9)
+
+        # Find the LoRA file
+        lora_dir = LORA_OUTPUT_DIR / lora_name
+        if not lora_dir.exists():
+            raise ValueError(f"LoRA directory not found: {lora_dir}")
+
+        # Find the highest epoch or any .safetensors file
+        lora_files = list(lora_dir.glob("*.safetensors"))
+        if not lora_files:
+            raise ValueError(f"No LoRA files found in {lora_dir}")
+
+        # Prefer epoch files, sorted by epoch number
+        epoch_files = [f for f in lora_files if "epoch" in f.name]
+        if epoch_files:
+            lora_file = sorted(epoch_files, key=lambda f: int(f.stem.split("-")[-1]) if f.stem.split("-")[-1].isdigit() else 0)[-1]
+        else:
+            lora_file = lora_files[0]
+
+        print(f"[{job_id}] Loading LoRA: {lora_file}")
+        update_job(job_id, progress=10)
+
+        # Load base Lightning model
+        pipe = load_qwen_lightning()
+        update_job(job_id, progress=20)
+
+        # Load custom LoRA
+        print(f"[{job_id}] Applying LoRA from {lora_file} with strength {lora_strength}...")
+        pipe.load_lora_weights(str(lora_dir), weight_name=lora_file.name)
+        pipe.set_adapters(["default"], adapter_weights=[lora_strength])
+        update_job(job_id, progress=30)
+
+        # Handle input image (for img2img) or create gray placeholder (for text-to-image)
+        width = req.get("width", 1280)
+        height = req.get("height", 720)
+
+        if req.get("image_base64"):
+            # img2img mode
+            input_image = Image.open(io.BytesIO(base64.b64decode(req["image_base64"])))
+            input_image = input_image.convert("RGB").resize((width, height))
+            print(f"[{job_id}] Using input image for img2img")
+        else:
+            # text-to-image mode: gray placeholder
+            input_image = Image.new("RGB", (width, height), (128, 128, 128))
+            print(f"[{job_id}] Using gray placeholder for text-to-image")
+
+        seed = req.get("seed", -1)
+        actual_seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
+        generator = torch.Generator("cuda").manual_seed(actual_seed)
+        print(f"[{job_id}] Using seed: {actual_seed}")
+
+        total_steps = req.get("num_steps", 28)
+
+        def progress_callback(pipe, step, timestep, callback_kwargs):
+            progress = 30 + int((step / total_steps) * 65)
+            update_job(job_id, progress=progress)
+            return callback_kwargs
+
+        print(f"[{job_id}] Running inference with prompt: {req['prompt'][:80]}...")
+        image = pipe(
+            prompt=req["prompt"],
+            image=input_image,
+            height=height,
+            width=width,
+            num_inference_steps=total_steps,
+            guidance_scale=req.get("guidance", 3.5),
+            generator=generator,
+            callback_on_step_end=progress_callback,
+        ).images[0]
+
+        update_job(job_id, progress=95)
+
+        # Unload LoRA to free memory
+        pipe.unload_lora_weights()
+
+        # Save and encode
+        path = OUTPUT_DIR / f"lora_{lora_name}_{job_id}.png"
+        image.save(path)
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        image_b64 = base64.b64encode(buffer.getvalue()).decode()
+
+        update_job(
+            job_id,
+            status="complete",
+            progress=100,
+            result={"image_base64": image_b64, "path": str(path), "seed": actual_seed},
+        )
+        print(f"[{job_id}] LoRA generation complete!")
+
+    except Exception as e:
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"[{job_id}] ERROR: {error_msg}")
+        update_job(job_id, status="failed", error=error_msg)
+
+
+@app.post("/generate_with_lora")
+async def generate_with_lora(req: GenerateWithLoRARequest):
+    """Generate image using base model + custom trained LoRA.
+
+    Use this for character-consistent or scene-consistent generation.
+    - Without image_base64: text-to-image with LoRA
+    - With image_base64: img2img editing with LoRA
+    """
+    job_id = create_job()
+    _executor.submit(_run_generate_with_lora, job_id, req.model_dump())
     return {"job_id": job_id, "status": "pending"}
 
 
