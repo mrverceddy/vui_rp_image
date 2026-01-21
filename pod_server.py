@@ -1516,8 +1516,8 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
                     if tqdm_match and num_epochs > 0:
                         tqdm_pct = int(tqdm_match.group(1))
                         # tqdm shows progress within current epoch, calculate overall progress
-                        # current_epoch starts at 1 for epoch 1, so completed = current_epoch - 1
-                        completed_epochs = max(0, current_epoch - 1)
+                        # DiffSynth uses 0-based epochs (epoch 0, 1, 2...), so completed = current_epoch
+                        completed_epochs = current_epoch  # Fixed: was max(0, current_epoch - 1)
                         epoch_fraction = tqdm_pct / 100.0
                         overall_progress = (completed_epochs + epoch_fraction) / num_epochs
                         progress = 20 + int(overall_progress * 70)  # Map to 20-90% range
