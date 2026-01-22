@@ -2039,8 +2039,12 @@ async def clear():
     return {"status": "cleared"}
 
 
+class WarmupRequest(BaseModel):
+    model: str = "qwen_image_edit_plus"
+
+
 @app.post("/warmup")
-async def warmup_model(model: str = "qwen_image_edit_plus"):
+async def warmup_model(req: WarmupRequest):
     """Preload a model into GPU memory.
 
     Call this before batch operations to ensure model is ready.
@@ -2051,6 +2055,7 @@ async def warmup_model(model: str = "qwen_image_edit_plus"):
             - "qwen_image_edit_plus" (default) - for character variations
             - "qwen_image_edit_angles" - for scene angles
     """
+    model = req.model
     if model == "qwen_image_edit_plus":
         if "qwen_image_edit_plus" in _models:
             return {
