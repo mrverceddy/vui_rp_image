@@ -133,6 +133,7 @@ def create_job() -> str:
             "error": None,
             "created_at": time.time(),
         }
+    print(f"[DEBUG] Created job {job_id} with status=pending", flush=True)
     return job_id
 
 
@@ -141,6 +142,9 @@ def update_job(job_id: str, **kwargs):
     with _job_lock:
         if job_id in _jobs:
             _jobs[job_id].update(kwargs)
+    # Debug log status changes
+    if "status" in kwargs:
+        print(f"[DEBUG] Job {job_id} status -> {kwargs['status']}", flush=True)
     # Schedule offload check when job completes or fails
     if kwargs.get("status") in ("complete", "failed"):
         _schedule_offload_if_idle()
@@ -246,7 +250,9 @@ async def get_job_status(job_id: str):
     """Get job status and result."""
     job = get_job(job_id)
     if not job:
+        print(f"[DEBUG] GET /job/{job_id} -> 404 NOT FOUND", flush=True)
         raise HTTPException(404, "Job not found")
+    print(f"[DEBUG] GET /job/{job_id} -> status={job.get('status')}, progress={job.get('progress')}", flush=True)
     return job
 
 
@@ -499,7 +505,7 @@ def load_qwen_lightning_with_angles_lora(lora_strength: float = 0.9):
             set_model_loading(True)
             try:
                 print(f"[Model Cache] Loading Lightning with Angles LoRA (current cache: {list(_models.keys())})")
-                clear_vram(keep_model="qwen_lightning_angles")
+                # Don't clear VRAM - 80GB is enough for both models to coexist
 
                 from diffusers import QwenImageEditPipeline
 
