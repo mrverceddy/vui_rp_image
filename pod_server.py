@@ -311,6 +311,13 @@ class SynthesizeVoiceRequest(BaseModel):
     text: str
 
 
+class UploadLoRARequest(BaseModel):
+    """Request to upload a LoRA file to the pod."""
+    lora_name: str  # Directory name (e.g., "myproject_characters")
+    filename: str  # Epoch filename (e.g., "epoch-9.safetensors")
+    lora_base64: str  # Base64-encoded safetensors file
+
+
 class TrainLoRARequest(BaseModel):
     dataset_url: str
     lora_name: str
@@ -1919,6 +1926,34 @@ async def list_loras():
                     "epochs": epochs
                 })
     return {"loras": loras}
+
+
+@app.post("/upload_lora")
+async def upload_lora(req: UploadLoRARequest):
+    """Upload a LoRA file to the pod.
+
+    Used to restore LoRAs that were trained previously but are no longer on the pod.
+    """
+    import base64
+
+    # Create directory
+    lora_dir = LORA_DIR / req.lora_name
+    lora_dir.mkdir(parents=True, exist_ok=True)
+
+    # Decode and save
+    lora_path = lora_dir / req.filename
+    try:
+        lora_bytes = base64.b64decode(req.lora_base64)
+        lora_path.write_bytes(lora_bytes)
+        size_mb = len(lora_bytes) / (1024 * 1024)
+        print(f"Uploaded LoRA: {req.lora_name}/{req.filename} ({size_mb:.1f}MB)")
+        return {
+            "success": True,
+            "path": str(lora_path),
+            "size_mb": round(size_mb, 2)
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Failed to save LoRA: {str(e)}")
 
 
 @app.get("/download_lora/{lora_name}/{filename}")
