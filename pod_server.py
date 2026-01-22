@@ -23,7 +23,7 @@ from uuid import uuid4
 
 import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -1930,9 +1930,10 @@ async def list_loras():
 
 @app.post("/upload_lora")
 async def upload_lora(req: UploadLoRARequest):
-    """Upload a LoRA file to the pod.
+    """Upload a LoRA file to the pod (base64 JSON - may hit size limits).
 
     Used to restore LoRAs that were trained previously but are no longer on the pod.
+    For large files, use /upload_lora_file instead.
     """
     import base64
 
@@ -1954,6 +1955,41 @@ async def upload_lora(req: UploadLoRARequest):
         }
     except Exception as e:
         raise HTTPException(500, f"Failed to save LoRA: {str(e)}")
+
+
+@app.post("/upload_lora_file")
+async def upload_lora_file(
+    lora_name: str = Form(...),
+    filename: str = Form(...),
+    file: UploadFile = File(...)
+):
+    """Upload a LoRA file via multipart/form-data (better for large files).
+
+    Use this endpoint for uploading large LoRA files (400MB+).
+    The file is streamed directly to disk without loading fully into memory.
+    """
+    # Create directory
+    lora_dir = LORA_DIR / lora_name
+    lora_dir.mkdir(parents=True, exist_ok=True)
+
+    lora_path = lora_dir / filename
+    try:
+        # Stream file to disk in chunks
+        size = 0
+        with open(lora_path, "wb") as f:
+            while chunk := await file.read(1024 * 1024):  # 1MB chunks
+                f.write(chunk)
+                size += len(chunk)
+
+        size_mb = size / (1024 * 1024)
+        print(f"Uploaded LoRA (file): {lora_name}/{filename} ({size_mb:.1f}MB)")
+        return {
+            "success": True,
+            "path": str(lora_path),
+            "size_mb": round(size_mb, 2)
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Failed to save LoRA file: {str(e)}")
 
 
 @app.get("/download_lora/{lora_name}/{filename}")
