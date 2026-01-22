@@ -974,8 +974,9 @@ def _run_character_variation(job_id: str, req: dict):
 
         update_job(job_id, status="running", progress=5)
 
-        # Load the Plus pipeline (reference conditioning)
-        pipe = load_qwen_image_edit_plus()
+        # Use the cached Lightning model with Angles LoRA (same model warmed up by backend)
+        # The angles LoRA helps with camera angle control in character variations
+        pipe = load_qwen_lightning_with_angles_lora()
         update_job(job_id, progress=15)
 
         # Decode reference image(s) - support both single and multi-ref modes
