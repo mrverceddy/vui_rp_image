@@ -39,6 +39,79 @@ app = FastAPI(title="StoryGen GPU Server")
 # Global model cache
 _models = {}
 
+# =============================================================================
+# MODEL FORMAT CONFIGURATION (FP8-only for inference)
+# =============================================================================
+# We use FP8 exclusively for inference (~24GB VRAM vs ~40GB for BF16)
+# LoRAs trained on BF16 work fine with FP8 via automatic upcasting
+# =============================================================================
+
+FP8_TRANSFORMER_PATH = MODEL_DIR / "qwen-edit-2511-fp8" / "qwen_image_edit_2511_fp8_e4m3fn.safetensors"
+BF16_MODEL_PATH = MODEL_DIR / "Qwen" / "Qwen-Image-Edit-2511"
+
+
+# =============================================================================
+# LORA METADATA FUNCTIONS
+# =============================================================================
+
+def save_lora_metadata(lora_dir: Path, lora_name: str, metadata: dict):
+    """Save LoRA metadata as JSON alongside safetensors files.
+
+    Creates {lora_name}.json in the lora_dir with training metadata.
+    """
+    import json
+    from datetime import datetime
+
+    metadata_file = lora_dir / f"{lora_name}_metadata.json"
+
+    # Add timestamp if not present
+    if "created_at" not in metadata:
+        metadata["created_at"] = datetime.now().isoformat()
+
+    # Ensure version is set
+    if "version" not in metadata:
+        metadata["version"] = "2.0"
+
+    # All LoRAs are trained on FP8 transformer
+    if "trained_on" not in metadata:
+        metadata["trained_on"] = "fp8"
+
+    with open(metadata_file, "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"[LoRA Metadata] Saved to {metadata_file}")
+    return metadata_file
+
+
+def load_lora_metadata(lora_dir: Path, lora_name: str = None) -> dict:
+    """Load LoRA metadata from JSON file.
+
+    Returns default metadata if file doesn't exist (legacy LoRAs).
+    """
+    import json
+
+    # Try to find metadata file
+    if lora_name:
+        metadata_file = lora_dir / f"{lora_name}_metadata.json"
+    else:
+        # Look for any metadata file in the directory
+        metadata_files = list(lora_dir.glob("*_metadata.json"))
+        if metadata_files:
+            metadata_file = metadata_files[0]
+        else:
+            metadata_file = None
+
+    if metadata_file and metadata_file.exists():
+        with open(metadata_file) as f:
+            return json.load(f)
+
+    # Default for legacy LoRAs (trained before metadata tracking)
+    return {
+        "trained_on": "fp8",  # All training uses FP8
+        "version": "1.0",
+        "legacy": True,
+    }
+
 # Job queue system
 _jobs = {}  # job_id -> {status, progress, result, error, created_at}
 _executor = ThreadPoolExecutor(max_workers=1)  # Single worker for GPU tasks
@@ -406,53 +479,85 @@ class MultiRefAngleRequest(BaseModel):
 
 
 # =============================================================================
-# IMAGE GENERATION (Qwen-Image-Edit-2511)
+# IMAGE GENERATION (Qwen-Image-Edit-2511 with FP8)
 # =============================================================================
-# ARCHITECTURE: Single Qwen-Image-Edit-2511 for ALL image generation
+# ARCHITECTURE: Single Qwen-Image-Edit-2511 with FP8 transformer for ALL image generation
 # - Text-to-image: gray (128,128,128) input + prompt
 # - Image editing: reference image + edit prompt
 # - With LoRA: Same model + character/scene LoRA = perfect consistency
-# - Standard inference (20-40 steps for quality)
+# - FP8 inference: ~24GB VRAM (vs ~40GB for BF16)
+# - LoRAs trained on BF16 work fine via automatic upcasting
 # =============================================================================
 
-def load_qwen_lightning():
-    """Load Qwen-Image-Edit-2511-Lightning for unified image generation.
+def load_fp8_transformer_weights(pipe):
+    """Load pre-quantized FP8 transformer weights into the pipeline.
+
+    Replaces the BF16 transformer with FP8 weights for ~24GB VRAM usage.
+    """
+    from safetensors.torch import load_file
+
+    if not FP8_TRANSFORMER_PATH.exists():
+        print(f"[FP8] Warning: FP8 weights not found at {FP8_TRANSFORMER_PATH}")
+        print("[FP8] Using BF16 transformer (higher VRAM usage)")
+        return pipe
+
+    print(f"[FP8] Loading pre-quantized FP8 transformer from {FP8_TRANSFORMER_PATH}...")
+    fp8_state_dict = load_file(str(FP8_TRANSFORMER_PATH))
+
+    # Load FP8 weights into transformer
+    pipe.transformer.load_state_dict(fp8_state_dict, strict=False)
+    print(f"[FP8] FP8 transformer loaded successfully (~24GB VRAM)")
+
+    return pipe
+
+
+def load_qwen_fp8():
+    """Load Qwen-Image-Edit-2511 with FP8 transformer for inference.
 
     This single model handles BOTH:
     - Text-to-image: Use gray (128,128,128) input image
     - Image editing: Use reference image
 
-    LoRAs trained on this model work for BOTH use cases,
-    enabling perfect character consistency across all generated images.
+    Uses pre-quantized FP8 transformer for ~24GB VRAM (vs ~40GB for BF16).
+    LoRAs trained on BF16 work fine via automatic upcasting.
     """
-    if "qwen_lightning" not in _models:
+    if "qwen_fp8" not in _models:
         set_model_loading(True)
         try:
-            print("Loading Qwen-Image-Edit-2511 (BF16 for inference)...")
+            print("[FP8] Loading Qwen-Image-Edit-2511 pipeline...")
             from diffusers import QwenImageEditPipeline
 
+            # Load full pipeline (VAE, text encoder, tokenizer stay in BF16)
             pipe = QwenImageEditPipeline.from_pretrained(
-                MODEL_DIR / "Qwen" / "Qwen-Image-Edit-2511",
+                BF16_MODEL_PATH,
                 torch_dtype=torch.bfloat16,
             )
 
+            # Replace transformer with FP8 weights
+            pipe = load_fp8_transformer_weights(pipe)
+
             pipe.to("cuda")
-            _models["qwen_lightning"] = pipe  # Keep key name for compatibility
-            print("Qwen-Image-Edit-2511 loaded (BF16)")
+            _models["qwen_fp8"] = pipe
+            print("[FP8] Qwen-Image-Edit-2511 loaded with FP8 transformer")
         finally:
             set_model_loading(False)
-    return _models["qwen_lightning"]
+    return _models["qwen_fp8"]
 
 
-# Legacy aliases for backwards compatibility
+# Aliases for backwards compatibility
+def load_qwen_lightning():
+    """Load FP8 model (legacy alias)."""
+    return load_qwen_fp8()
+
+
 def load_qwen_image():
-    """Load unified Lightning model (legacy alias for text-to-image)."""
-    return load_qwen_lightning()
+    """Load FP8 model (legacy alias for text-to-image)."""
+    return load_qwen_fp8()
 
 
 def load_qwen_image_edit():
-    """Load unified Lightning model (legacy alias for editing)."""
-    return load_qwen_lightning()
+    """Load FP8 model (legacy alias for editing)."""
+    return load_qwen_fp8()
 
 
 def _patch_transformers_generation_config():
@@ -486,62 +591,80 @@ _patch_transformers_generation_config()
 
 
 def load_qwen_image_edit_plus():
-    """Load Lightning model (legacy alias for plus pipeline).
+    """Load FP8 model with Plus pipeline for reference conditioning.
 
-    The Lightning model handles reference conditioning natively.
+    The Plus pipeline handles reference conditioning natively.
     For text-to-image: use gray input
     For editing: use reference image
     """
-    return load_qwen_lightning()
+    return load_qwen_fp8_plus()
 
 
-def load_qwen_lightning_with_angles_lora(lora_strength: float = 0.9):
-    """Load Lightning model with Multiple Angles LoRA for camera control.
+def load_qwen_fp8_plus(with_angles_lora: bool = False, lora_strength: float = 0.9):
+    """Load Qwen-Image-Edit-2511 Plus pipeline with FP8 transformer.
 
-    Uses the unified Lightning model with the Multiple Angles LoRA.
+    Args:
+        with_angles_lora: Whether to load the Multiple-Angles LoRA
+        lora_strength: LoRA strength (only used if with_angles_lora=True)
+
+    Returns:
+        Loaded pipeline ready for inference (~24GB VRAM)
     """
+    cache_key = "qwen_fp8_plus" + ("_angles" if with_angles_lora else "")
+
     with _model_ops_lock:
-        if "qwen_lightning_angles" not in _models:
-            set_model_loading(True)
-            try:
-                print(f"[Model Cache] Loading Lightning with Angles LoRA (current cache: {list(_models.keys())})")
-                # Don't clear VRAM - 80GB is enough for both models to coexist
+        if cache_key in _models:
+            pipe = _models[cache_key]
+            # Update LoRA strength if needed
+            if with_angles_lora and _models.get(f"{cache_key}_lora_loaded"):
+                pipe.set_adapters(["default_0"], adapter_weights=[lora_strength])
+            return pipe
 
-                # Use QwenImageEditPlusPipeline for multi-image reference support
-                from diffusers import QwenImageEditPlusPipeline
+        set_model_loading(True)
+        try:
+            print("[FP8] Loading Qwen-Image-Edit-2511 Plus pipeline...")
+            print("[FP8] Expected VRAM: ~24GB")
 
-                pipe = QwenImageEditPlusPipeline.from_pretrained(
-                    MODEL_DIR / "Qwen" / "Qwen-Image-Edit-2511",
-                    torch_dtype=torch.bfloat16,
-                )
+            from diffusers import QwenImageEditPlusPipeline
 
-                pipe.to("cuda")
-                print("Qwen-Image-Edit-2511 (Plus Pipeline) loaded to GPU")
+            # Load full pipeline (VAE, text encoder, tokenizer stay in BF16)
+            pipe = QwenImageEditPlusPipeline.from_pretrained(
+                BF16_MODEL_PATH,
+                torch_dtype=torch.bfloat16,
+            )
 
-                # Load the Multiple Angles LoRA
+            # Replace transformer with pre-quantized FP8 weights
+            pipe = load_fp8_transformer_weights(pipe)
+
+            pipe.to("cuda")
+            print("[FP8] Model loaded to GPU")
+
+            # Load Multiple-Angles LoRA if requested
+            if with_angles_lora:
                 lora_path = MODEL_DIR / "loras" / "multiple-angles"
                 lora_file = lora_path / "qwen-image-edit-2511-multiple-angles-lora.safetensors"
 
                 if lora_file.exists():
-                    print(f"Loading Multiple Angles LoRA from {lora_file}...")
+                    print(f"[FP8] Loading Multiple-Angles LoRA from {lora_file}...")
                     pipe.load_lora_weights(str(lora_path), weight_name="qwen-image-edit-2511-multiple-angles-lora.safetensors")
-                    print(f"LoRA loaded, will set strength at inference time")
-                    _models["qwen_lightning_angles_lora_loaded"] = True
+                    pipe.set_adapters(["default_0"], adapter_weights=[lora_strength])
+                    _models[f"{cache_key}_lora_loaded"] = True
+                    print(f"[FP8] LoRA loaded with strength {lora_strength}")
                 else:
-                    print(f"Warning: LoRA file not found at {lora_file}, using base model")
-                    _models["qwen_lightning_angles_lora_loaded"] = False
+                    print(f"[FP8] Warning: LoRA not found at {lora_file}")
+                    _models[f"{cache_key}_lora_loaded"] = False
 
-                _models["qwen_lightning_angles"] = pipe
-                print(f"[Model Cache] Successfully loaded qwen_lightning_angles")
-            finally:
-                set_model_loading(False)
+            _models[cache_key] = pipe
+            print(f"[FP8] Successfully loaded and cached as '{cache_key}'")
+            return pipe
 
-    pipe = _models["qwen_lightning_angles"]
-    if _models.get("qwen_lightning_angles_lora_loaded"):
-        pipe.set_adapters(["default_0"], adapter_weights=[lora_strength])
-        print(f"LoRA strength set to {lora_strength}")
+        finally:
+            set_model_loading(False)
 
-    return pipe
+
+def load_qwen_lightning_with_angles_lora(lora_strength: float = 0.9):
+    """Load FP8 model with Multiple Angles LoRA for camera control."""
+    return load_qwen_fp8_plus(with_angles_lora=True, lora_strength=lora_strength)
 
 
 # Legacy alias
@@ -551,20 +674,21 @@ def load_qwen_image_edit_with_angles_lora(lora_strength: float = 0.9):
 
 
 def _run_image_generation(job_id: str, req: dict):
-    """Background worker for text-to-image generation using Lightning.
+    """Background worker for text-to-image generation.
 
     Uses gray (128,128,128) input image for text-to-image mode.
-    The Lightning model treats this as "generate from scratch".
+    The model treats this as "generate from scratch".
+    Uses FP8 quantized model (~24GB VRAM).
     """
     try:
         from PIL import Image as PILImage
 
-        print(f"[{job_id}] Starting text-to-image generation (Lightning)...")
+        print(f"[{job_id}] Starting text-to-image generation (FP8)...")
         update_job(job_id, status="running", progress=5)
 
-        print(f"[{job_id}] Loading Qwen-Image-Edit-Lightning...")
-        pipe = load_qwen_lightning()
-        print(f"[{job_id}] Model loaded, dtype: {pipe.transformer.dtype}")
+        print(f"[{job_id}] Loading Qwen-Image-Edit (FP8)...")
+        pipe = load_qwen_fp8_plus()
+        print(f"[{job_id}] Model loaded")
         update_job(job_id, progress=10)
 
         seed = req.get("seed", -1)
@@ -640,17 +764,18 @@ async def generate_image(req: GenerateImageRequest):
 # =============================================================================
 
 def _run_image_edit(job_id: str, req: dict):
-    """Background worker for image editing using Lightning model.
+    """Background worker for image editing.
 
     Uses the same model as text-to-image but with reference image input.
+    Uses FP8 quantized model (~24GB VRAM).
     """
     try:
         from PIL import Image
 
         update_job(job_id, status="running", progress=5)
 
-        # Use unified Lightning model
-        pipe = load_qwen_lightning()
+        # Load FP8 model
+        pipe = load_qwen_fp8_plus()
         update_job(job_id, progress=10)
 
         # Decode input image
@@ -727,8 +852,9 @@ async def edit_image(req: EditImageRequest):
 def _run_generate_with_lora(job_id: str, req: dict):
     """Background worker for image generation with custom trained LoRA.
 
-    Loads base Lightning model + custom LoRA for character/scene consistency.
+    Loads base model + custom LoRA for character/scene consistency.
     Supports both text-to-image (no input image) and img2img (with input image).
+    Uses FP8 quantized model (~24GB VRAM).
     """
     try:
         from PIL import Image
@@ -758,8 +884,12 @@ def _run_generate_with_lora(job_id: str, req: dict):
         print(f"[{job_id}] Loading LoRA: {lora_file}")
         update_job(job_id, progress=10)
 
-        # Load base Lightning model
-        pipe = load_qwen_lightning()
+        # Load LoRA metadata (for logging)
+        lora_metadata = load_lora_metadata(lora_dir, lora_name)
+        print(f"[{job_id}] LoRA trained on: {lora_metadata.get('trained_on', 'fp8')}")
+
+        # Load FP8 model
+        pipe = load_qwen_fp8_plus()
         update_job(job_id, progress=20)
 
         # Unload any existing LoRA from previous calls (they accumulate on cached pipeline)
@@ -964,6 +1094,7 @@ def _run_character_variation(job_id: str, req: dict):
 
     Uses QwenImageEditPlusPipeline - reference image(s) as CONDITIONING, not init image.
     Generates from scratch while maintaining character consistency.
+    Uses FP8 quantized model (~24GB VRAM).
 
     Supports multi-reference conditioning for improved consistency:
     - Single ref: Legacy mode, uses reference_image_base64
@@ -975,9 +1106,9 @@ def _run_character_variation(job_id: str, req: dict):
 
         update_job(job_id, status="running", progress=5)
 
-        # Use the cached Lightning model with Angles LoRA (same model warmed up by backend)
-        # The angles LoRA helps with camera angle control in character variations
-        pipe = load_qwen_lightning_with_angles_lora()
+        # Load FP8 model with angles LoRA for camera control
+        print(f"[{job_id}] Loading model (FP8) with angles LoRA...")
+        pipe = load_qwen_fp8_plus(with_angles_lora=True)
         update_job(job_id, progress=15)
 
         # Decode reference image(s) - support both single and multi-ref modes
@@ -1141,16 +1272,19 @@ def _run_scene_angle(job_id: str, req: dict):
     """Background worker for scene camera angle generation using Multiple Angles LoRA.
 
     Uses the <sks> trigger format: <sks> [azimuth] [elevation] [distance]
+    Uses FP8 quantized model (~24GB VRAM).
     """
     try:
         from PIL import Image
 
-        print(f"[{job_id}] Starting scene angle generation...")
+        lora_strength = req.get("lora_strength", 0.9)
+
+        print(f"[{job_id}] Starting scene angle generation (FP8)...")
         update_job(job_id, status="running", progress=5)
 
-        # Load model with LoRA
-        print(f"[{job_id}] Loading model...")
-        pipe = load_qwen_image_edit_with_angles_lora(req.get("lora_strength", 0.9))
+        # Load FP8 model with angles LoRA
+        print(f"[{job_id}] Loading model (FP8) with angles LoRA...")
+        pipe = load_qwen_fp8_plus(with_angles_lora=True, lora_strength=lora_strength)
         print(f"[{job_id}] Model loaded, preparing input...")
         update_job(job_id, progress=15)
 
@@ -1266,6 +1400,7 @@ def _run_multi_ref_angle(job_id: str, req: dict):
     Combines:
     1. Multi-reference conditioning (3 refs at 0°, 135°, 225°) for character consistency
     2. Multiple-Angles LoRA for precise camera control
+    Uses FP8 quantized model (~24GB VRAM).
 
     This is the best approach for LoRA training data:
     - 3 refs provide character appearance from multiple angles
@@ -1275,12 +1410,14 @@ def _run_multi_ref_angle(job_id: str, req: dict):
     try:
         from PIL import Image
 
-        print(f"[{job_id}] Starting multi-ref + angle generation...")
+        lora_strength = req.get("lora_strength", 0.9)
+
+        print(f"[{job_id}] Starting multi-ref + angle generation (FP8)...")
         update_job(job_id, status="running", progress=5)
 
-        # Load model with Multiple-Angles LoRA
-        print(f"[{job_id}] Loading model with Multiple-Angles LoRA...")
-        pipe = load_qwen_image_edit_with_angles_lora(req.get("lora_strength", 0.9))
+        # Load FP8 model with Multiple-Angles LoRA
+        print(f"[{job_id}] Loading model (FP8) with angles LoRA...")
+        pipe = load_qwen_fp8_plus(with_angles_lora=True, lora_strength=lora_strength)
         print(f"[{job_id}] Model loaded")
         update_job(job_id, progress=15)
 
@@ -1969,6 +2106,20 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
                 lora_b64 = base64.b64encode(lora_path.read_bytes()).decode()
                 lora_size_mb = lora_path.stat().st_size / (1024 * 1024)
 
+                # Save LoRA metadata for compatibility tracking
+                lora_metadata = {
+                    "trained_on": "fp8",  # Current training uses FP8 transformer
+                    "training_params": {
+                        "epochs": req_dict.get("num_epochs", 10),
+                        "learning_rate": req_dict.get("learning_rate", 1e-4),
+                        "rank": req_dict.get("network_rank", 32),
+                        "width": req_dict.get("width", 1024),
+                        "height": req_dict.get("height", 576),
+                    },
+                    "trigger_word": req_dict.get("trigger_word", ""),
+                }
+                save_lora_metadata(lora_path.parent, req_dict["lora_name"], lora_metadata)
+
                 update_job(
                     job_id,
                     status="complete",
@@ -1978,6 +2129,7 @@ def _run_lora_training_base64(job_id: str, req_dict: dict):
                         "lora_path": str(lora_path),
                         "lora_size_mb": lora_size_mb,
                         "training_log": result.stdout[-2000:] if result.stdout else "",
+                        "trained_on": "fp8",
                     }
                 )
                 print(f"[{job_id}] Training complete! LoRA size: {lora_size_mb:.1f}MB")

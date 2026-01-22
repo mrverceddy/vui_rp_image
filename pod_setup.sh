@@ -61,6 +61,9 @@ pip install \
     aiofiles \
     python-multipart
 
+# Note: FP8 quantization libraries (optimum-quanto, torchao) not needed
+# We load pre-quantized FP8 transformer weights directly via safetensors
+
 # Parler-TTS (note: may have transformers version conflict, but still works)
 echo "Installing Parler-TTS..."
 pip install git+https://github.com/huggingface/parler-tts.git --no-deps
@@ -130,23 +133,30 @@ pip uninstall bitsandbytes -y 2>/dev/null || true
 echo "=== Downloading Models ==="
 
 # Download models (this takes a while first time)
-# Architecture: Unified Qwen-Image-Edit-2511-Lightning for ALL image generation
+# Architecture: Qwen-Image-Edit-2511 with FP8 transformer (all inference)
 # - Text-to-image: Use gray (128,128,128) input + prompt
 # - Image editing: Use reference image + edit prompt
 # - With LoRA: Same model + character/scene LoRA for consistency
+# - FP8 inference: Pre-quantized transformer (~24GB VRAM)
+# - BF16 base model provides VAE, text encoder, tokenizer
 python3 << 'EOF'
 import os
 os.environ["HF_HOME"] = "/workspace/models"
 
 from huggingface_hub import snapshot_download
 
-# Qwen-Image-Edit-2511 with FP8 transformer for faster training
-# Download base model to path DiffSynth expects: /workspace/models/Qwen/Qwen-Image-Edit-2511
-print("Downloading Qwen-Image-Edit-2511 base model...")
+# Qwen-Image-Edit-2511 base model (BF16)
+# - Provides VAE, text encoder, tokenizer (kept in BF16)
+# - Transformer is replaced with pre-quantized FP8 weights for inference
+# Download to path DiffSynth expects: /workspace/models/Qwen/Qwen-Image-Edit-2511
+print("Downloading Qwen-Image-Edit-2511 base model (BF16)...")
 snapshot_download("Qwen/Qwen-Image-Edit-2511", local_dir="/workspace/models/Qwen/Qwen-Image-Edit-2511")
 
-# Download FP8 quantized transformer (replaces BF16 transformer for faster training)
-print("Downloading FP8 transformer (20GB, faster training)...")
+# FP8 quantized transformer for DiffSynth-Studio LoRA training
+# - Pre-quantized FP8 file for faster training (~16GB VRAM vs 40GB)
+# - NOT used for inference (we use runtime quantization from BF16 instead)
+# - DiffSynth-Studio loads this directly for LoRA training
+print("Downloading FP8 transformer for training (DiffSynth-Studio)...")
 from huggingface_hub import hf_hub_download
 hf_hub_download(
     repo_id="drbaph/Qwen-Image-Edit-2511-FP8",
@@ -166,7 +176,7 @@ snapshot_download("fishaudio/fish-speech-1.4", local_dir="/workspace/models/fish
 
 print("Downloading LoRAs...")
 
-# Multiple Angles LoRA for scene camera control (compatible with Lightning)
+# Multiple Angles LoRA for scene camera control (trained on BF16, works with FP8 via upcast)
 print("  - Multiple Angles LoRA (scene camera control)...")
 snapshot_download(
     "fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA",
@@ -175,9 +185,17 @@ snapshot_download(
 
 print("=== All models downloaded! ===")
 print("")
-print("Architecture: Qwen-Image-Edit-2511 with FP8 training")
-print("  - Base model: BF16 (for inference)")
-print("  - FP8 transformer: For faster LoRA training (~16GB VRAM vs 40GB)")
+print("Architecture: Qwen-Image-Edit-2511 with FP8 (all inference)")
+print("")
+print("Inference:")
+print("  - FP8: Pre-quantized transformer (~24GB VRAM)")
+print("  - Base BF16 model provides VAE, text encoder, tokenizer")
+print("")
+print("Training (DiffSynth-Studio):")
+print("  - FP8 transformer: Pre-quantized for faster training (~16GB VRAM)")
+print("")
+print("LoRA compatibility:")
+print("  - LoRAs trained on BF16 work with FP8 inference (auto-upcast)")
 print("  - LoRAs trained work for BOTH text-to-image AND editing")
 EOF
 
