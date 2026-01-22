@@ -1034,6 +1034,17 @@ def _run_character_variation(job_id: str, req: dict):
         if not neg_prompt:
             neg_prompt = " "  # Minimal negative prompt for this model
 
+        # DEBUG: Log all parameters before calling pipeline
+        print(f"[{job_id}] === PIPELINE CALL DEBUG ===", flush=True)
+        print(f"[{job_id}] Prompt: {base_prompt[:100]}...", flush=True)
+        print(f"[{job_id}] Negative: {neg_prompt[:50]}", flush=True)
+        print(f"[{job_id}] Num ref images: {len(ref_images)}", flush=True)
+        for i, img in enumerate(ref_images):
+            print(f"[{job_id}] Ref image {i+1}: size={img.size}, mode={img.mode}", flush=True)
+        print(f"[{job_id}] Output size: {req.get('width', 1280)}x{req.get('height', 720)}", flush=True)
+        print(f"[{job_id}] Steps: {total_steps}, CFG: {req.get('cfg', 4.0)}", flush=True)
+        print(f"[{job_id}] ===========================", flush=True)
+
         # QwenImageEditPlusPipeline: reference image(s) as conditioning
         # Key difference: image is passed as list for conditioning, NOT init latent
         # Multi-ref: prompt can use "image 1", "image 2", "image 3" to reference each
@@ -1077,7 +1088,10 @@ def _run_character_variation(job_id: str, req: dict):
 
     except Exception as e:
         import traceback
-        update_job(job_id, status="failed", error=f"{str(e)}\n{traceback.format_exc()}")
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"[{job_id}] ❌ FAILED: {str(e)}", flush=True)
+        print(f"[{job_id}] Traceback:\n{traceback.format_exc()}", flush=True)
+        update_job(job_id, status="failed", error=error_msg)
 
 
 @app.post("/generate_character_variation")
