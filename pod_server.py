@@ -997,6 +997,19 @@ def _run_character_variation(job_id: str, req: dict):
         else:
             raise ValueError("No reference image provided (need reference_image_base64 or reference_images_base64)")
 
+        # Normalize all reference images to the same size (required by Qwen VLM encoder)
+        # Use output dimensions from request, or first image's size as target
+        target_w = req.get("width", ref_images[0].size[0])
+        target_h = req.get("height", ref_images[0].size[1])
+        normalized_refs = []
+        for i, img in enumerate(ref_images):
+            if img.size != (target_w, target_h):
+                print(f"[{job_id}] Resizing ref image {i+1} from {img.size} to ({target_w}, {target_h})")
+                img = img.resize((target_w, target_h), Image.LANCZOS)
+            normalized_refs.append(img)
+        ref_images = normalized_refs
+        print(f"[{job_id}] All ref images normalized to ({target_w}, {target_h})")
+
         seed = req.get("seed", -1)
         actual_seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
         generator = torch.Generator("cuda").manual_seed(actual_seed)
