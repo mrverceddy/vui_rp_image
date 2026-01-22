@@ -1030,6 +1030,27 @@ def _run_character_variation(job_id: str, req: dict):
             # Prepend VLM-suggested details (e.g., "wearing blue dress with white collar")
             base_prompt = f"{enhanced}, {base_prompt}"
 
+        # Add multi-ref context explaining reference images to the model
+        # The Plus pipeline auto-prepends "Picture N:" tokens, but the model needs
+        # context about what each reference shows and how to use them
+        if len(ref_images) >= 3:
+            ref_context = (
+                "Reference images show the same character from multiple angles: "
+                "image 1 shows the front view (0°), image 2 shows the back-right view (135°), "
+                "image 3 shows the back-left view (225°). "
+                "Generate a new image of this character maintaining consistency with all reference angles. "
+            )
+            base_prompt = ref_context + base_prompt
+        elif len(ref_images) == 2:
+            ref_context = (
+                "Reference images show the same character from two angles. "
+                "Generate a new image of this character maintaining consistency with both references. "
+            )
+            base_prompt = ref_context + base_prompt
+        elif len(ref_images) == 1:
+            ref_context = "Using the character shown in image 1 as reference, "
+            base_prompt = ref_context + base_prompt
+
         # Build negative prompt with VLM suggestions if provided
         neg_prompt = req.get("negative_prompt", "").strip()
         if not neg_prompt:
@@ -1287,13 +1308,14 @@ def _run_multi_ref_angle(job_id: str, req: dict):
         # Format: <sks> [camera] + multi-ref context
         prompt = f"<sks> {azimuth} {elevation} {distance}"
 
-        # Add multi-ref context to prompt
+        # Add multi-ref context to prompt - explain what each reference image shows
+        # so the model understands how to use them for consistency
         if len(ref_images) >= 3:
-            prompt += ", the character shown in image 1 (front), image 2 (side), and image 3 (back)"
+            prompt += ", the subject shown in image 1 (front 0°), image 2 (back-right 135°), and image 3 (back-left 225°)"
         elif len(ref_images) == 2:
-            prompt += ", the character shown in image 1 and image 2"
+            prompt += ", the subject shown in image 1 and image 2 from different angles"
         else:
-            prompt += ", the character from image 1"
+            prompt += ", the subject from image 1"
 
         if additional:
             prompt = f"{prompt}, {additional}"
