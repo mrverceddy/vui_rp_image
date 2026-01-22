@@ -507,15 +507,16 @@ def load_qwen_lightning_with_angles_lora(lora_strength: float = 0.9):
                 print(f"[Model Cache] Loading Lightning with Angles LoRA (current cache: {list(_models.keys())})")
                 # Don't clear VRAM - 80GB is enough for both models to coexist
 
-                from diffusers import QwenImageEditPipeline
+                # Use QwenImageEditPlusPipeline for multi-image reference support
+                from diffusers import QwenImageEditPlusPipeline
 
-                pipe = QwenImageEditPipeline.from_pretrained(
+                pipe = QwenImageEditPlusPipeline.from_pretrained(
                     MODEL_DIR / "Qwen" / "Qwen-Image-Edit-2511",
                     torch_dtype=torch.bfloat16,
                 )
 
                 pipe.to("cuda")
-                print("Qwen-Image-Edit-2511 loaded to GPU")
+                print("Qwen-Image-Edit-2511 (Plus Pipeline) loaded to GPU")
 
                 # Load the Multiple Angles LoRA
                 lora_path = MODEL_DIR / "loras" / "multiple-angles"
