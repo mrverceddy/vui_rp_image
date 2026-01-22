@@ -356,8 +356,16 @@ class CharacterVariationRequest(BaseModel):
 
     This generates new images of a character from a reference image.
     The reference is used as CONDITIONING, not img2img - generates from scratch.
+
+    Supports multiple reference images for better consistency:
+    - image 1: front view (0°)
+    - image 2: side view (120°)
+    - image 3: back-side view (240°)
+
+    Prompt can reference images: "the character from image 1 in a new pose"
     """
-    reference_image_base64: str  # Reference image of the character
+    reference_image_base64: Optional[str] = None  # Single reference (legacy, use reference_images instead)
+    reference_images_base64: Optional[list[str]] = None  # Multiple references (0°, 120°, 240°)
     prompt: str  # Description of the new pose/scene (e.g., "the character is sitting on a bench")
     negative_prompt: str = ""  # Things to avoid (e.g., "extra arms, wrong clothing")
     enhanced_prompt: str = ""  # VLM-suggested details to add (e.g., "wearing blue dress")
@@ -365,6 +373,29 @@ class CharacterVariationRequest(BaseModel):
     height: int = 720
     num_steps: int = 20  # WWAA uses 20 steps
     cfg: float = 4.0  # CFG scale (WWAA uses 4)
+    seed: int = -1
+
+
+class MultiRefAngleRequest(BaseModel):
+    """Request for multi-reference + camera angle generation.
+
+    Combines multi-reference conditioning (3 refs at 0°, 120°, 240°) with
+    Multiple-Angles LoRA for precise camera control. Best for LoRA training
+    datasets where you need both character consistency AND angle control.
+
+    The references provide character appearance from multiple angles.
+    The <sks> trigger controls the output camera angle.
+    """
+    reference_images_base64: list[str]  # 3 references: [front, 120°, 240°]
+    azimuth: str = "front view"  # Output camera angle (front view, right side view, etc.)
+    elevation: str = "eye-level shot"  # Vertical angle
+    distance: str = "medium shot"  # Camera distance
+    additional_prompt: str = ""  # Extra context (character name, art style)
+    width: int = 1280
+    height: int = 720
+    num_steps: int = 28  # Good balance for quality with LoRA
+    guidance: float = 4.0
+    lora_strength: float = 0.9
     seed: int = -1
 
 
@@ -924,8 +955,13 @@ async def generate_image_v2(req: GenerateImageRequest):
 def _run_character_variation(job_id: str, req: dict):
     """Background worker for character variation using reference conditioning.
 
-    Uses QwenImageEditPlusPipeline - reference image as CONDITIONING, not init image.
+    Uses QwenImageEditPlusPipeline - reference image(s) as CONDITIONING, not init image.
     Generates from scratch while maintaining character consistency.
+
+    Supports multi-reference conditioning for improved consistency:
+    - Single ref: Legacy mode, uses reference_image_base64
+    - Multi-ref: Uses reference_images_base64 list [front, 120°, 240°]
+      Prompt can reference "image 1", "image 2", "image 3" for multi-angle context
     """
     try:
         from PIL import Image
@@ -936,9 +972,23 @@ def _run_character_variation(job_id: str, req: dict):
         pipe = load_qwen_image_edit_plus()
         update_job(job_id, progress=15)
 
-        # Decode reference image
-        ref_image = Image.open(io.BytesIO(base64.b64decode(req["reference_image_base64"])))
-        ref_image = ref_image.convert("RGB")
+        # Decode reference image(s) - support both single and multi-ref modes
+        ref_images = []
+        if req.get("reference_images_base64"):
+            # Multi-reference mode: decode all reference images
+            print(f"[{job_id}] Multi-ref mode: {len(req['reference_images_base64'])} reference images")
+            for i, img_b64 in enumerate(req["reference_images_base64"]):
+                img = Image.open(io.BytesIO(base64.b64decode(img_b64))).convert("RGB")
+                ref_images.append(img)
+                print(f"[{job_id}] Decoded ref image {i+1}: {img.size}")
+        elif req.get("reference_image_base64"):
+            # Legacy single reference mode
+            ref_image = Image.open(io.BytesIO(base64.b64decode(req["reference_image_base64"])))
+            ref_image = ref_image.convert("RGB")
+            ref_images = [ref_image]
+            print(f"[{job_id}] Single-ref mode: {ref_image.size}")
+        else:
+            raise ValueError("No reference image provided (need reference_image_base64 or reference_images_base64)")
 
         seed = req.get("seed", -1)
         actual_seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
@@ -964,10 +1014,11 @@ def _run_character_variation(job_id: str, req: dict):
         if not neg_prompt:
             neg_prompt = " "  # Minimal negative prompt for this model
 
-        # QwenImageEditPlusPipeline: reference image as conditioning
+        # QwenImageEditPlusPipeline: reference image(s) as conditioning
         # Key difference: image is passed as list for conditioning, NOT init latent
+        # Multi-ref: prompt can use "image 1", "image 2", "image 3" to reference each
         output = pipe(
-            image=[ref_image],  # Reference image as conditioning (list!)
+            image=ref_images,  # Reference image(s) as conditioning (list!)
             prompt=base_prompt,
             negative_prompt=neg_prompt,
             num_inference_steps=total_steps,
@@ -1146,6 +1197,152 @@ async def generate_scene_angle(req: SceneAngleRequest):
     """
     job_id = create_job()
     _executor.submit(_run_scene_angle, job_id, req.model_dump())
+    return {"job_id": job_id, "status": "pending"}
+
+
+# =============================================================================
+# MULTI-REFERENCE + ANGLE GENERATION
+# =============================================================================
+
+def _run_multi_ref_angle(job_id: str, req: dict):
+    """Background worker for multi-reference + camera angle generation.
+
+    Combines:
+    1. Multi-reference conditioning (3 refs at 0°, 135°, 225°) for character consistency
+    2. Multiple-Angles LoRA for precise camera control
+
+    This is the best approach for LoRA training data:
+    - 3 refs provide character appearance from multiple angles
+    - LoRA controls the output camera angle precisely
+    - Result: consistent character at any requested angle
+    """
+    try:
+        from PIL import Image
+
+        print(f"[{job_id}] Starting multi-ref + angle generation...")
+        update_job(job_id, status="running", progress=5)
+
+        # Load model with Multiple-Angles LoRA
+        print(f"[{job_id}] Loading model with Multiple-Angles LoRA...")
+        pipe = load_qwen_image_edit_with_angles_lora(req.get("lora_strength", 0.9))
+        print(f"[{job_id}] Model loaded")
+        update_job(job_id, progress=15)
+
+        # Decode all reference images
+        ref_images = []
+        for i, img_b64 in enumerate(req["reference_images_base64"]):
+            img = Image.open(io.BytesIO(base64.b64decode(img_b64))).convert("RGB")
+            ref_images.append(img)
+            print(f"[{job_id}] Decoded ref image {i+1}: {img.size}")
+
+        if len(ref_images) < 1:
+            raise ValueError("Need at least 1 reference image")
+
+        seed = req.get("seed", -1)
+        actual_seed = seed if seed >= 0 else random.randint(0, 2**32 - 1)
+        generator = torch.Generator("cuda").manual_seed(actual_seed)
+        print(f"[{job_id}] Using seed: {actual_seed}")
+
+        # Build prompt with <sks> trigger for camera control
+        azimuth = req.get("azimuth", "front view")
+        elevation = req.get("elevation", "eye-level shot")
+        distance = req.get("distance", "medium shot")
+        additional = req.get("additional_prompt", "")
+
+        # Format: <sks> [camera] + multi-ref context
+        prompt = f"<sks> {azimuth} {elevation} {distance}"
+
+        # Add multi-ref context to prompt
+        if len(ref_images) >= 3:
+            prompt += ", the character shown in image 1 (front), image 2 (side), and image 3 (back)"
+        elif len(ref_images) == 2:
+            prompt += ", the character shown in image 1 and image 2"
+        else:
+            prompt += ", the character from image 1"
+
+        if additional:
+            prompt = f"{prompt}, {additional}"
+
+        total_steps = req.get("num_steps", 28)
+        print(f"[{job_id}] Prompt: {prompt}")
+        print(f"[{job_id}] Starting inference with {total_steps} steps, {len(ref_images)} refs...")
+
+        def progress_callback(pipe, step, timestep, callback_kwargs):
+            progress = 15 + int((step / total_steps) * 80)
+            update_job(job_id, progress=progress)
+            if step % 10 == 0:
+                print(f"[{job_id}] Step {step}/{total_steps}")
+            return callback_kwargs
+
+        # Run pipeline with multi-ref + LoRA
+        image = pipe(
+            prompt=prompt,
+            negative_prompt=" ",
+            image=ref_images,  # Multi-reference conditioning
+            height=req.get("height", 720),
+            width=req.get("width", 1280),
+            num_inference_steps=total_steps,
+            guidance_scale=1.0,
+            true_cfg_scale=req.get("guidance", 4.0),
+            generator=generator,
+            callback_on_step_end=progress_callback,
+        ).images[0]
+
+        print(f"[{job_id}] Inference complete, saving image...")
+        update_job(job_id, progress=95)
+
+        # Save and encode
+        path = OUTPUT_DIR / f"multiref_angle_{job_id}.png"
+        image.save(path)
+        print(f"[{job_id}] Image saved to {path}")
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        image_b64 = base64.b64encode(buffer.getvalue()).decode()
+
+        update_job(
+            job_id,
+            status="complete",
+            progress=100,
+            result={
+                "image_base64": image_b64,
+                "path": str(path),
+                "prompt": prompt,
+                "azimuth": azimuth,
+                "elevation": elevation,
+                "distance": distance,
+                "num_refs": len(ref_images),
+                "seed": actual_seed,
+            },
+        )
+        print(f"[{job_id}] Multi-ref + angle generation complete!")
+
+    except Exception as e:
+        import traceback
+        error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        print(f"[{job_id}] ERROR: {error_msg}")
+        update_job(job_id, status="failed", error=error_msg)
+
+
+@app.post("/generate_multi_ref_angle")
+async def generate_multi_ref_angle(req: MultiRefAngleRequest):
+    """Generate image using multiple references + camera angle control.
+
+    Combines multi-reference conditioning (3 refs at 0°, 135°, 225°) with
+    Multiple-Angles LoRA for precise camera control.
+
+    This is ideal for LoRA training datasets:
+    - Provide 3 reference images (front, 120° side, 240° back-side)
+    - Specify desired output camera angle
+    - Result: consistent character at the requested angle
+
+    Camera Controls (same as /generate_scene_angle):
+    - azimuth: "front view", "front-right quarter view", "right side view", etc.
+    - elevation: "low-angle shot", "eye-level shot", "elevated shot", "high-angle shot"
+    - distance: "close-up", "medium shot", "wide shot"
+    """
+    job_id = create_job()
+    _executor.submit(_run_multi_ref_angle, job_id, req.model_dump())
     return {"job_id": job_id, "status": "pending"}
 
 
