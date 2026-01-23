@@ -21,9 +21,9 @@ echo "Using Python: $(which python)"
 echo "Torch version: $(python -c 'import torch; print(torch.__version__)')"
 
 # Check models
-if [ ! -d "/workspace/models/qwen-image" ]; then
+if [ ! -d "/workspace/models/Qwen/Qwen-Image-Edit-2511" ]; then
     echo ""
-    echo "WARNING: Models not found in /workspace/models"
+    echo "WARNING: Qwen-Image-Edit-2511 model not found"
     echo "Run 'bash pod_setup.sh' first to download models"
     echo ""
 fi
