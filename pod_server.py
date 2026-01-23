@@ -797,14 +797,16 @@ def _run_image_edit(job_id: str, req: dict):
             update_job(job_id, progress=progress)
             return callback_kwargs
 
-        # Lightning model simplified parameters
+        # QwenImageEditPlusPipeline parameters
+        # Use guidance_scale=1.0 and true_cfg_scale for actual CFG
         image = pipe(
             prompt=req["prompt"],
-            image=input_image,
+            image=[input_image],  # List for Plus pipeline reference conditioning
             height=req.get("height", 1024),
             width=req.get("width", 1024),
             num_inference_steps=total_steps,
-            guidance_scale=req.get("guidance", 3.5),
+            guidance_scale=1.0,
+            true_cfg_scale=req.get("guidance", 4.0),
             generator=generator,
             callback_on_step_end=progress_callback,
         ).images[0]
@@ -932,13 +934,16 @@ def _run_generate_with_lora(job_id: str, req: dict):
             return callback_kwargs
 
         print(f"[{job_id}] Running inference with prompt: {req['prompt'][:80]}...")
+        # QwenImageEditPlusPipeline parameters
+        # Use guidance_scale=1.0 and true_cfg_scale for actual CFG
         image = pipe(
             prompt=req["prompt"],
-            image=input_image,
+            image=[input_image],  # List for Plus pipeline reference conditioning
             height=height,
             width=width,
             num_inference_steps=total_steps,
-            guidance_scale=req.get("guidance", 3.5),
+            guidance_scale=1.0,
+            true_cfg_scale=req.get("guidance", 4.0),
             generator=generator,
             callback_on_step_end=progress_callback,
         ).images[0]
@@ -1106,11 +1111,9 @@ def _run_character_variation(job_id: str, req: dict):
 
         update_job(job_id, status="running", progress=5)
 
-        # Load FP8 model WITHOUT angles LoRA for character variation
-        # The angles LoRA is for camera control with <sks> trigger, not character consistency
-        # Character variation uses reference conditioning only
-        print(f"[{job_id}] Loading model (FP8) without angles LoRA...")
-        pipe = load_qwen_fp8_plus(with_angles_lora=False)
+        # Load FP8 model with angles LoRA for camera control
+        print(f"[{job_id}] Loading model (FP8) with angles LoRA...")
+        pipe = load_qwen_fp8_plus(with_angles_lora=True)
         update_job(job_id, progress=15)
 
         # Decode reference image(s) - support both single and multi-ref modes
