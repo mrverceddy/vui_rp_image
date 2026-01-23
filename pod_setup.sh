@@ -103,18 +103,20 @@ pip install --no-cache-dir torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --
 
 # Install other ML dependencies
 pip install --no-cache-dir "huggingface-hub>=0.30.0" "accelerate>=1.2.0"
-# transformers from git for DINOv3 support (required by DiffSynth-Studio)
-pip install --no-cache-dir git+https://github.com/huggingface/transformers.git
 pip install --no-cache-dir git+https://github.com/huggingface/diffusers.git
-# peft from git for compatibility with transformers 5.0.0.dev0
-pip install --no-cache-dir git+https://github.com/huggingface/peft.git
+
+# Install transformers and peft from git LAST (after all other packages)
+# This ensures they don't get overwritten by other dependencies
+echo "Installing transformers and peft from git (must be last)..."
+pip install --no-cache-dir --force-reinstall git+https://github.com/huggingface/transformers.git
+pip install --no-cache-dir --force-reinstall git+https://github.com/huggingface/peft.git
 
 # Verify versions are compatible
 echo "Verifying ML stack versions..."
-python3 -c "import transformers; print(f'transformers: {transformers.__version__}')"
-python3 -c "import huggingface_hub; print(f'huggingface_hub: {huggingface_hub.__version__}')"
-python3 -c "import torch; print(f'torch: {torch.__version__}')"
-python3 -c "import torchvision; print(f'torchvision: {torchvision.__version__}')"
+python3 -c "import transformers; print(f'transformers: {transformers.__version__}')" || echo "Warning: transformers import failed"
+python3 -c "import huggingface_hub; print(f'huggingface_hub: {huggingface_hub.__version__}')" || echo "Warning: huggingface_hub import failed"
+python3 -c "import torch; print(f'torch: {torch.__version__}')" || echo "Warning: torch import failed"
+python3 -c "import torchvision; print(f'torchvision: {torchvision.__version__}')" || echo "Warning: torchvision import failed"
 
 # Test torchvision actually works (catches version mismatch errors)
 echo "Testing torchvision import..."
