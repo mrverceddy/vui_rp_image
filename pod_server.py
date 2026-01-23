@@ -450,8 +450,8 @@ class CharacterVariationRequest(BaseModel):
     enhanced_prompt: str = ""  # VLM-suggested details to add (e.g., "wearing blue dress")
     width: int = 1280  # Match Wan 2.2 video output (16:9)
     height: int = 720
-    num_steps: int = 20  # WWAA uses 20 steps
-    cfg: float = 4.0  # CFG scale (WWAA uses 4)
+    num_steps: int = 28  # Qwen-Image-Edit-2511 needs 28-40 steps for quality
+    cfg: float = 4.0  # CFG scale
     seed: int = -1
 
 
@@ -1106,9 +1106,11 @@ def _run_character_variation(job_id: str, req: dict):
 
         update_job(job_id, status="running", progress=5)
 
-        # Load FP8 model with angles LoRA for camera control
-        print(f"[{job_id}] Loading model (FP8) with angles LoRA...")
-        pipe = load_qwen_fp8_plus(with_angles_lora=True)
+        # Load FP8 model WITHOUT angles LoRA for character variation
+        # The angles LoRA is for camera control with <sks> trigger, not character consistency
+        # Character variation uses reference conditioning only
+        print(f"[{job_id}] Loading model (FP8) without angles LoRA...")
+        pipe = load_qwen_fp8_plus(with_angles_lora=False)
         update_job(job_id, progress=15)
 
         # Decode reference image(s) - support both single and multi-ref modes
