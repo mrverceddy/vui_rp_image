@@ -1,53 +1,70 @@
 #!/bin/bash
 # RunPod GPU Pod Setup Script for StoryGen
 # Run this once when you create the pod
+#
+# Order of operations:
+# 1. System dependencies
+# 2. Create venv + install PyTorch
+# 3. Install custom model libs (parler-tts, fish-speech) with --no-deps
+# 4. Install training tools (DiffSynth-Studio)
+# 5. Download all models
+# 6. Install Qwen pipeline dependencies LAST (transformers, diffusers, peft from git)
+# 7. Verify everything works
 
 set -e
 
+echo "=============================================="
 echo "=== StoryGen Pod Setup ==="
+echo "=============================================="
 
 # Create model directory (use /workspace for persistence)
 MODEL_DIR="/workspace/models"
 mkdir -p $MODEL_DIR
 
-# Install system dependencies
+# =============================================================================
+# PHASE 1: System Dependencies
+# =============================================================================
+echo ""
+echo "=== Phase 1: System Dependencies ==="
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg libsndfile1 git-lfs aria2 portaudio19-dev libportaudio2 python3-venv
 
-# Create clean virtual environment to isolate from broken system packages
+# =============================================================================
+# PHASE 2: Virtual Environment + PyTorch
+# =============================================================================
+echo ""
+echo "=== Phase 2: Virtual Environment + PyTorch ==="
+
 VENV_DIR="/workspace/venv"
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating clean virtual environment at $VENV_DIR..."
-    python3 -m venv "$VENV_DIR"
+
+# Always recreate venv to avoid conflicts
+if [ -d "$VENV_DIR" ]; then
+    echo "Removing existing venv to ensure clean state..."
+    rm -rf "$VENV_DIR"
 fi
+
+echo "Creating clean virtual environment at $VENV_DIR..."
+python3 -m venv "$VENV_DIR"
 
 # Activate venv for this script
 source "$VENV_DIR/bin/activate"
-echo "Using Python: $(which python3)"
+echo "Using Python: $(which python)"
+echo "Using pip: $(which pip)"
 
 # Upgrade pip
 pip install --upgrade pip
 
-# Install PyTorch 2.5 with CUDA 12.1 (required for Qwen-Image enable_gqa)
-echo "Installing PyTorch 2.5..."
+# Install PyTorch 2.5 with CUDA 12.1
+echo "Installing PyTorch 2.5 with CUDA 12.1..."
 pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
 
-# Install diffusers stack with compatible versions
-# transformers from git requires huggingface-hub>=1.3.0
-echo "Installing diffusers and transformers..."
-pip install git+https://github.com/huggingface/diffusers.git
-pip install git+https://github.com/huggingface/transformers.git
+# Install base dependencies that everything needs
 pip install \
-    "huggingface-hub>=1.3.0" \
+    "huggingface-hub>=0.25.0" \
     "accelerate>=1.2.0" \
-    safetensors
-# peft from git for compatibility with transformers from git
-pip install git+https://github.com/huggingface/peft.git
-
-# Install other dependencies
-# NOTE: bitsandbytes removed - causes triton.ops conflict and we don't need 8-bit quantization
-pip install \
+    safetensors \
     fastapi \
     uvicorn \
     sentencepiece \
@@ -59,156 +76,195 @@ pip install \
     einops \
     toml \
     aiofiles \
-    python-multipart
+    python-multipart \
+    pillow
 
-# Note: FP8 quantization libraries (optimum-quanto, torchao) not needed
-# We load pre-quantized FP8 transformer weights directly via safetensors
+# =============================================================================
+# PHASE 3: Custom Model Libraries (with --no-deps to prevent conflicts)
+# =============================================================================
+echo ""
+echo "=== Phase 3: Custom Model Libraries ==="
 
-# Parler-TTS (note: may have transformers version conflict, but still works)
-echo "Installing Parler-TTS..."
+# Parler-TTS - install without deps to avoid transformers version conflicts
+echo "Installing Parler-TTS (--no-deps)..."
 pip install git+https://github.com/huggingface/parler-tts.git --no-deps
 pip install descript-audio-codec
 
-# Fish Speech (requires pyaudio which needs portaudio headers)
-echo "Installing Fish Speech..."
-# Install pyaudio first (needs portaudio19-dev from apt-get above)
+# Fish Speech - install without deps
+echo "Installing Fish Speech (--no-deps)..."
 pip install pyaudio || echo "Warning: pyaudio install failed, continuing..."
-pip install fish-speech || pip install fish-speech --no-deps
+pip install fish-speech --no-deps || echo "Warning: fish-speech install failed, continuing..."
 
-# Kohya sd-scripts for SDXL LoRA training (legacy, kept for compatibility)
-if [ ! -d "/workspace/sd-scripts" ]; then
-    git clone https://github.com/kohya-ss/sd-scripts.git /workspace/sd-scripts
-    cd /workspace/sd-scripts && pip install -r requirements.txt
-fi
+# =============================================================================
+# PHASE 4: Training Tools
+# =============================================================================
+echo ""
+echo "=== Phase 4: Training Tools ==="
 
-# DiffSynth-Studio for Qwen-Image LoRA training (official)
+# DiffSynth-Studio for Qwen-Image LoRA training
 if [ ! -d "/workspace/DiffSynth-Studio" ]; then
-    echo "Cloning DiffSynth-Studio for Qwen-Image LoRA training..."
+    echo "Cloning DiffSynth-Studio..."
     git clone https://github.com/modelscope/DiffSynth-Studio.git /workspace/DiffSynth-Studio
 fi
-# Always ensure DiffSynth is installed (in case clone succeeded but install failed)
-echo "Installing DiffSynth-Studio..."
-cd /workspace/DiffSynth-Studio && pip install -e .
+echo "Installing DiffSynth-Studio (--no-deps to prevent conflicts)..."
+cd /workspace/DiffSynth-Studio && pip install -e . --no-deps
+cd /workspace
 
-# FlyMyAI LoRA trainer (alternative, simpler)
-if [ ! -d "/workspace/flymyai-lora-trainer" ]; then
-    echo "Installing FlyMyAI LoRA trainer..."
-    git clone https://github.com/FlyMyAI/flymyai-lora-trainer.git /workspace/flymyai-lora-trainer
-    cd /workspace/flymyai-lora-trainer && pip install -r requirements.txt
+# Kohya sd-scripts (optional, legacy)
+if [ ! -d "/workspace/sd-scripts" ]; then
+    echo "Cloning Kohya sd-scripts..."
+    git clone https://github.com/kohya-ss/sd-scripts.git /workspace/sd-scripts
 fi
 
-# IMPORTANT: Install ML stack in clean venv (no system package conflicts)
-echo "=== Installing ML stack in venv ==="
-pip install --no-cache-dir torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
+# =============================================================================
+# PHASE 5: Download Models
+# =============================================================================
+echo ""
+echo "=== Phase 5: Downloading Models ==="
+echo "This may take a while on first run (~60GB total)..."
 
-# Install other ML dependencies
-pip install --no-cache-dir "huggingface-hub>=0.30.0" "accelerate>=1.2.0"
-pip install --no-cache-dir git+https://github.com/huggingface/diffusers.git
-
-# Install transformers and peft from git LAST (after all other packages)
-# This ensures they don't get overwritten by other dependencies
-echo "Installing transformers and peft from git (must be last)..."
-pip install --no-cache-dir --force-reinstall git+https://github.com/huggingface/transformers.git
-pip install --no-cache-dir --force-reinstall git+https://github.com/huggingface/peft.git
-
-# Verify versions are compatible
-echo "Verifying ML stack versions..."
-python3 -c "import transformers; print(f'transformers: {transformers.__version__}')" || echo "Warning: transformers import failed"
-python3 -c "import huggingface_hub; print(f'huggingface_hub: {huggingface_hub.__version__}')" || echo "Warning: huggingface_hub import failed"
-python3 -c "import torch; print(f'torch: {torch.__version__}')" || echo "Warning: torch import failed"
-python3 -c "import torchvision; print(f'torchvision: {torchvision.__version__}')" || echo "Warning: torchvision import failed"
-
-# Test torchvision actually works (catches version mismatch errors)
-echo "Testing torchvision import..."
-python3 -c "from torchvision import transforms; print('torchvision OK')" || {
-    echo "ERROR: torchvision broken, attempting full reinstall..."
-    pip uninstall torch torchvision torchaudio -y
-    pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
-    python3 -c "from torchvision import transforms; print('torchvision OK after reinstall')"
-}
-
-# CRITICAL: Remove bitsandbytes if installed - causes triton.ops import error
-# bitsandbytes tries to import triton.ops which doesn't exist in newer triton versions
-echo "Removing bitsandbytes (causes triton compatibility issues)..."
-pip uninstall bitsandbytes -y 2>/dev/null || true
-
-echo "=== Downloading Models ==="
-
-# Download models (this takes a while first time)
-# Architecture: Qwen-Image-Edit-2511 with FP8 transformer (all inference)
-# - Text-to-image: Use gray (128,128,128) input + prompt
-# - Image editing: Use reference image + edit prompt
-# - With LoRA: Same model + character/scene LoRA for consistency
-# - FP8 inference: Pre-quantized transformer (~24GB VRAM)
-# - BF16 base model provides VAE, text encoder, tokenizer
 python3 << 'EOF'
 import os
 os.environ["HF_HOME"] = "/workspace/models"
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, hf_hub_download
 
 # Qwen-Image-Edit-2511 base model (BF16)
-# - Provides VAE, text encoder, tokenizer (kept in BF16)
-# - Transformer is replaced with pre-quantized FP8 weights for inference
-# Download to path DiffSynth expects: /workspace/models/Qwen/Qwen-Image-Edit-2511
-print("Downloading Qwen-Image-Edit-2511 base model (BF16)...")
-snapshot_download("Qwen/Qwen-Image-Edit-2511", local_dir="/workspace/models/Qwen/Qwen-Image-Edit-2511")
+# Provides VAE, text encoder, tokenizer
+print("\n[1/6] Downloading Qwen-Image-Edit-2511 base model (~40GB)...")
+snapshot_download(
+    "Qwen/Qwen-Image-Edit-2511",
+    local_dir="/workspace/models/Qwen/Qwen-Image-Edit-2511"
+)
 
-# FP8 quantized transformer for DiffSynth-Studio LoRA training
-# - Pre-quantized FP8 file for faster training (~16GB VRAM vs 40GB)
-# - NOT used for inference (we use runtime quantization from BF16 instead)
-# - DiffSynth-Studio loads this directly for LoRA training
-print("Downloading FP8 transformer for training (DiffSynth-Studio)...")
-from huggingface_hub import hf_hub_download
+# FP8 quantized transformer for inference
+print("\n[2/6] Downloading FP8 transformer (~20GB)...")
 hf_hub_download(
     repo_id="drbaph/Qwen-Image-Edit-2511-FP8",
     filename="qwen_image_edit_2511_fp8_e4m3fn.safetensors",
     local_dir="/workspace/models/qwen-edit-2511-fp8"
 )
 
-# Wan 2.1 FLF2V - First-Last-Frame to Video (for scene animation)
-print("Downloading Wan 2.1 FLF2V (First-Last-Frame to Video)...")
-snapshot_download("Wan-AI/Wan2.1-FLF2V-14B-720P-diffusers", local_dir="/workspace/models/wan-flf2v")
+# Wan 2.1 FLF2V for video generation
+print("\n[3/6] Downloading Wan 2.1 FLF2V...")
+snapshot_download(
+    "Wan-AI/Wan2.1-FLF2V-14B-720P-diffusers",
+    local_dir="/workspace/models/wan-flf2v"
+)
 
-print("Downloading Parler-TTS...")
-snapshot_download("parler-tts/parler-tts-mini-v1", local_dir="/workspace/models/parler-tts")
+# Parler-TTS for voice generation
+print("\n[4/6] Downloading Parler-TTS...")
+snapshot_download(
+    "parler-tts/parler-tts-mini-v1",
+    local_dir="/workspace/models/parler-tts"
+)
 
-print("Downloading Fish Speech...")
-snapshot_download("fishaudio/fish-speech-1.4", local_dir="/workspace/models/fish-speech")
+# Fish Speech for voice cloning
+print("\n[5/6] Downloading Fish Speech...")
+snapshot_download(
+    "fishaudio/fish-speech-1.4",
+    local_dir="/workspace/models/fish-speech"
+)
 
-print("Downloading LoRAs...")
-
-# Multiple Angles LoRA for scene camera control (trained on BF16, works with FP8 via upcast)
-print("  - Multiple Angles LoRA (scene camera control)...")
+# Multiple Angles LoRA for camera control
+print("\n[6/6] Downloading Multiple Angles LoRA...")
 snapshot_download(
     "fal/Qwen-Image-Edit-2511-Multiple-Angles-LoRA",
     local_dir="/workspace/models/loras/multiple-angles"
 )
 
-print("=== All models downloaded! ===")
-print("")
-print("Architecture: Qwen-Image-Edit-2511 with FP8 (all inference)")
-print("")
-print("Inference:")
-print("  - FP8: Pre-quantized transformer (~24GB VRAM)")
-print("  - Base BF16 model provides VAE, text encoder, tokenizer")
-print("")
-print("Training (DiffSynth-Studio):")
-print("  - FP8 transformer: Pre-quantized for faster training (~16GB VRAM)")
-print("")
-print("LoRA compatibility:")
-print("  - LoRAs trained on BF16 work with FP8 inference (auto-upcast)")
-print("  - LoRAs trained work for BOTH text-to-image AND editing")
+print("\n=== All models downloaded! ===")
+EOF
+
+# =============================================================================
+# PHASE 6: Qwen Pipeline Dependencies (MUST BE LAST)
+# =============================================================================
+echo ""
+echo "=== Phase 6: Qwen Pipeline Dependencies (installing last to prevent overwrites) ==="
+
+# Remove any conflicting packages
+pip uninstall bitsandbytes optimum-quanto -y 2>/dev/null || true
+
+# Install latest diffusers, transformers, peft from git
+# These MUST be installed last as other packages may try to downgrade them
+echo "Installing diffusers from git..."
+pip install --no-cache-dir git+https://github.com/huggingface/diffusers.git
+
+echo "Installing transformers from git..."
+pip install --no-cache-dir git+https://github.com/huggingface/transformers.git
+
+echo "Installing peft from git..."
+pip install --no-cache-dir git+https://github.com/huggingface/peft.git
+
+# =============================================================================
+# PHASE 7: Verification
+# =============================================================================
+echo ""
+echo "=== Phase 7: Verification ==="
+
+echo "Checking installed versions..."
+python3 << 'EOF'
+import sys
+
+def check_import(name, package=None):
+    package = package or name
+    try:
+        mod = __import__(package)
+        version = getattr(mod, '__version__', 'unknown')
+        print(f"  ✓ {name}: {version}")
+        return True
+    except ImportError as e:
+        print(f"  ✗ {name}: FAILED - {e}")
+        return False
+
+print("\nCore packages:")
+check_import("torch")
+check_import("torchvision")
+check_import("transformers")
+check_import("diffusers")
+check_import("peft")
+check_import("accelerate")
+check_import("safetensors")
+
+print("\nQwen pipeline test:")
+try:
+    from diffusers import QwenImageEditPipeline, QwenImageEditPlusPipeline
+    print("  ✓ QwenImageEditPipeline available")
+    print("  ✓ QwenImageEditPlusPipeline available")
+except ImportError as e:
+    print(f"  ✗ Qwen pipelines: FAILED - {e}")
+    sys.exit(1)
+
+print("\nFP8 loading test:")
+try:
+    from safetensors.torch import load_file
+    print("  ✓ safetensors.torch.load_file available")
+except ImportError as e:
+    print(f"  ✗ safetensors: FAILED - {e}")
+
+print("\nOptional packages:")
+check_import("parler_tts", "parler_tts")
+check_import("fish_speech", "fish_speech")
+
+print("\n=== Verification complete ===")
 EOF
 
 echo ""
+echo "=============================================="
 echo "=== Setup Complete ==="
+echo "=============================================="
+echo ""
 echo "Models are in: /workspace/models"
 echo "Virtual environment: /workspace/venv"
 echo ""
-echo "To start the server, run:"
-echo "  source /workspace/venv/bin/activate && python /workspace/vui_rp_image/pod_server.py"
+echo "Architecture: Qwen-Image-Edit-2511 with FP8 inference"
+echo "  - FP8 transformer: ~24GB VRAM"
+echo "  - Base BF16 model provides VAE, text encoder, tokenizer"
+echo "  - LoRAs work via automatic upcasting"
 echo ""
-echo "Or use the start script:"
-echo "  bash /workspace/vui_rp_image/start.sh"
+echo "To start the server:"
+echo "  source /workspace/venv/bin/activate"
+echo "  python /workspace/vui_rp_image/pod_server.py"
+echo ""
+echo "Or use: bash /workspace/vui_rp_image/start.sh"
 echo ""
